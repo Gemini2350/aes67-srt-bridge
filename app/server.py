@@ -48,6 +48,7 @@ DEFAULT_CONFIG = {
     "rx_sdp_cache": {},
     "annotations": {},
     "ncp_state": {},
+    "bcp008": {"degradation_delay": 3},
 }
 
 TX_DEFAULT = {"dir": "tx", "label": "SRT TX", "enabled": True,
@@ -349,6 +350,11 @@ class Bridge:
                 doms = self.cfg["registry"].get("domains")
                 if isinstance(doms, str):
                     self.cfg["registry"]["domains"] = [d.strip() for d in doms.replace(",", " ").split() if d.strip()]
+            if "bcp008" in body:
+                d = float((body["bcp008"] or {}).get("degradation_delay", 3))
+                if not 0 <= d <= 3600:
+                    raise ValueError("degradation delay must be 0..3600 s")
+                self.cfg["bcp008"] = {"degradation_delay": d}
             if "clock" in body:
                 self.cfg["clock"] = merge(self.cfg["clock"], body["clock"])
                 self.clock.mode = self.cfg["clock"].get("mode", "auto")
@@ -563,7 +569,10 @@ class Handler(BaseHTTPRequestHandler):
         if parts == ["state"] and method == "GET":
             return self._send(200, b.state())
         if parts == ["settings"] and method == "POST":
-            b.update_settings(body or {})
+            try:
+                b.update_settings(body or {})
+            except (ValueError, TypeError) as e:
+                return self._send(400, {"error": str(e)})
             return self._send(200, {"ok": True})
         if parts == ["discover"] and method == "POST":
             reg = b.cfg["registry"]

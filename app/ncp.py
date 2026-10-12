@@ -11,8 +11,9 @@ Device model (oids are constant):
 Status behaviour follows BCP-008-01/-02:
 * on activation the domains with an Inactive option go to Healthy immediately; for statusReportingDelay
   seconds afterwards non-healthy states are held back,
-* after that a less healthy state is reported immediately, a healthier one only once it persisted for
-  statusReportingDelay,
+* after that a healthier state is reported only once it persisted for statusReportingDelay; a less healthy
+  state is reported once it persisted for degradation_delay (setting "bcp008.degradation_delay", default 3 s –
+  a deliberate deviation from BCP-008, which reports it immediately; 0 restores the BCP-008 behaviour),
 * deactivation sets connection/transmission, stream/essence and overall to Inactive immediately,
 * transition counters count transitions to less healthy states (not to/from neutral states),
 * autoResetCountersAndMessages (default true) resets counters and messages on every activation,
@@ -287,6 +288,12 @@ class NcpServer:
         }
         return index in values, values.get(index)
 
+    def degradation_delay(self) -> float:
+        try:
+            return float((self.b.config().get("bcp008") or {}).get("degradation_delay", 3))
+        except (TypeError, ValueError):
+            return 3.0
+
     # ------------------------------------------------------------------ BCP-008 state machine
     def activate(self, chid: str):
         """IS-05 activation with master_enable true (also re-activation with new parameters)."""
@@ -349,8 +356,25 @@ class NcpServer:
                 in_grace = m.active and now < m.activation_until
                 if in_grace and status != HEALTHY and not neutral:
                     continue                                   # hold back non-healthy states after activation
-                if neutral or status > d.status or m.delay == 0:
-                    self._apply(m, name, status, message)       # worse: immediately
+                if neutral:
+                    self._apply(m, name, status, message)
+                    continue
+                if status > d.status:
+                    # worse: BCP-008 reports it immediately; the bridge holds it back for degradation_delay (default 3 s,
+                    # 0 = BCP-008 conform) so short dropouts do not raise alarms
+                    hold = self.degradation_delay()
+                    if hold <= 0:
+                        self._apply(m, name, status, message)
+                    elif d.pending and d.pending[0] > d.status:  # already degraded: keep the start time
+                        if now - d.pending[2] >= hold:
+                            self._apply(m, name, status, message)
+                        else:
+                            d.pending = (status, message, d.pending[2])
+                    else:
+                        d.pending = (status, message, now)
+                    continue
+                if m.delay == 0:
+                    self._apply(m, name, status, message)
                     continue
                 if d.pending and d.pending[0] == status:        # better: only after it persisted
                     if now - d.pending[2] >= m.delay:

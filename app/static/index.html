@@ -103,6 +103,10 @@ pre{background:var(--code);padding:8px;border-radius:6px;overflow:auto;max-heigh
           <select id="s_clk"><option value="auto">auto (CLOCK_TAI if set)</option><option value="tai">CLOCK_TAI</option><option value="realtime">CLOCK_REALTIME + offset</option></select></div>
         <div><label>TAI − UTC offset (s)</label><input id="s_utc" type="number"></div>
       </div>
+      <div class="row">
+        <div><label>BCP-008: report degradations after (s) – 0 = immediately as in BCP-008</label><input id="s_degr" type="number" min="0" step="0.5"></div>
+        <div></div>
+      </div>
       <div class="btns">
         <button class="primary" onclick="saveSettings()">Save</button>
         <button onclick="discover()">Discover registries</button>
@@ -316,6 +320,7 @@ function fillSettings() {
   $('s_domains').value = (c.registry.domains || []).join(' '); $('s_query').value = c.registry.query_url || '';
   $('s_mdns').checked = c.registry.mdns !== false; $('s_dns').value = c.registry.dns_server || '';
   $('s_gmid').value = c.ptp_gmid || ''; $('s_clk').value = c.clock.mode || 'auto'; $('s_utc').value = c.clock.utc_offset ?? 37;
+  $('s_degr').value = (c.bcp008 || {}).degradation_delay ?? 3;
   $('settingsBox').dataset.filled = 1;
 }
 
@@ -324,6 +329,7 @@ async function saveSettings() {
     node_label: $('s_label').value, interface: $('s_iface').value, ptp_gmid: $('s_gmid').value,
     registry: {mode: $('s_regmode').value, url: $('s_regurl').value, domains: $('s_domains').value, query_url: $('s_query').value, dns_server: $('s_dns').value, mdns: $('s_mdns').checked},
     clock: {mode: $('s_clk').value, utc_offset: +$('s_utc').value || 37},
+    bcp008: {degradation_delay: $('s_degr').value === '' ? 3 : +$('s_degr').value},
   }).catch(e => alert(e.message));
   delete $('settingsBox').dataset.filled;
   refresh();
