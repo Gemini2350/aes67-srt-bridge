@@ -82,10 +82,8 @@ For each status domain, the bridge reports what it can actually measure:
 These BCP-008 rules are implemented:
 * On activation, domains with an Inactive state go to Healthy immediately. Non-healthy states are held back for
   `statusReportingDelay` (default 3 s, settable).
-* After that, a better state is reported only after it has persisted for `statusReportingDelay`.
-* **Deliberate deviation:** a worse state is reported only after it has persisted for 3 s, so short dropouts raise
-  no alarm. BCP-008 reports it immediately. Change this under Settings ("report degradations after", stored as
-  `bcp008.degradation_delay`); 0 restores the BCP-008 behaviour.
+* After that, a worse state is reported immediately. A better state is reported only after it has persisted for
+  `statusReportingDelay`.
 * Deactivation sets connection/transmission, stream/essence and overall to Inactive immediately.
 * Transition counters count only changes to a less healthy state.
 * `autoResetCountersAndMessages` resets counters and messages on every activation.
@@ -132,9 +130,6 @@ every suite: IS-04-01 (48 pass), IS-05-01, IS-12-01 (120 pass, invasive + exhaus
 BCP-008-01-01 (98 pass) and BCP-008-02-01 (96 pass).
 The remaining "Manual" items need forced error conditions and were checked by hand: link loss, multicast loss and
 SRT loss, with notifications in the order domain status → message → overall.
-These results were measured with the degradation delay set to 0. With the default of 3 s there are still 0
-failures. Some BCP-008 transition tests then become "Manual", because the delayed degradation falls outside the
-tool's observation window.
 "Could Not Test" items cover optional features the bridge does not use: constraints, vendor classes, BCP-004
 receiver caps and BCP-002 tags. The testing tool has no IS-13 suite yet, so IS-13 was tested manually.
 
