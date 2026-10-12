@@ -23,9 +23,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 import dnssd
+import health
+import ncp
 import nmos_node
 import pipelines
 import sdp as sdplib
+from websocket import ServerWebSocket
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(BASE, "static")
@@ -43,6 +46,8 @@ DEFAULT_CONFIG = {
     "channels": [],
     "conn_state": {},
     "rx_sdp_cache": {},
+    "annotations": {},
+    "ncp_state": {},
 }
 
 TX_DEFAULT = {"dir": "tx", "label": "SRT TX", "enabled": True,
@@ -63,7 +68,7 @@ def log(kind: str, text: str):
 def merge(default: dict, saved: dict) -> dict:
     out = copy.deepcopy(default)
     for k, v in (saved or {}).items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict) and k not in ("conn_state", "rx_sdp_cache"):
+        if isinstance(v, dict) and isinstance(out.get(k), dict) and k not in ("conn_state", "rx_sdp_cache", "annotations", "ncp_state"):
             out[k] = merge(out[k], v)
         else:
             out[k] = v
@@ -121,6 +126,8 @@ class Bridge:
         self.tx_sdps: dict[str, str] = {}
         self._iface = None
         self.node = nmos_node.Node(self)
+        self.ncp = ncp.NcpServer(self)
+        self.health = health.Health(self)
 
     def log(self, kind: str, text: str):
         log(kind, text)
@@ -196,7 +203,7 @@ class Bridge:
                   f"({info.get('encoding')}/{info.get('sample_rate')}/{info.get('channels')}ch, {info.get('multicast_ip')}:{info.get('port')})")
         p = self.pipes.get(chid)
         if isinstance(p, pipelines.RxPipeline):
-            p.set_rate(info.get("sample_rate"))
+            p.set_format(info)
         self.node.build()
         if ch.get("auto_enable") and not old:
             st = self.node.conn_state(self.node.sender_id(chid), "sender")
@@ -219,6 +226,7 @@ class Bridge:
             log("is05", f"TX {ch['label']}: disconnected")
         if isinstance(p, pipelines.TxPipeline):
             p.set_source(src)
+        self.ncp.activate(chid) if src else self.ncp.deactivate(chid)
 
     def rx_activate(self, chid: str, active: dict):
         p = self.pipes.get(chid)
@@ -228,10 +236,26 @@ class Bridge:
         log("is05", f"RX {ch['label']}: output {'%s:%d' % dest if dest else 'disabled'}")
         if isinstance(p, pipelines.RxPipeline):
             p.set_output(dest)
+        self.ncp.activate(chid) if dest else self.ncp.deactivate(chid)
 
     # ------------------------------------------------------------------ pipelines
+    def sync_monitors(self):
+        """One BCP-008 monitor per channel, labelled like its (possibly IS-13 annotated) NMOS resource."""
+        chans = []
+        for ch in self.cfg["channels"]:
+            kind = "receiver" if ch["dir"] == "tx" else "sender"
+            rid = self.node.receiver_id(ch["id"]) if kind == "receiver" else self.node.sender_id(ch["id"])
+            res = self.node.get(kind, rid)
+            chans.append({"chid": ch["id"], "kind": kind, "resource_id": rid, "label": (res or {}).get("label") or ch["label"]})
+        self.ncp.sync_channels(chans)
+
+    def annotations_changed(self):
+        self.sync_monitors()
+
     def apply(self):
         """Start/stop/restart pipelines so they match the configuration."""
+        self.node.build()
+        self.sync_monitors()
         with self.lock:
             want = {ch["id"]: ch for ch in self.cfg["channels"] if ch.get("enabled", True)}
             ip = self.interface_ip()
@@ -252,7 +276,7 @@ class Bridge:
                         p = pipelines.RxPipeline(ch, index, ip, self.clock, log, self.on_rx_sdp)
                         sdp_text = self.rx_sdp(chid)
                         if sdp_text:
-                            p.set_rate(sdplib.parse(sdp_text).get("sample_rate"))
+                            p.set_format(sdplib.parse(sdp_text))
                 except OSError as e:
                     log("error", f"{ch['label']}: cannot start pipeline: {e}")
                     continue
@@ -269,6 +293,7 @@ class Bridge:
                     active["transport_params"] = [self.node.resolve("sender", chid, active["transport_params"][0])]
                     self.rx_activate(chid, active)
         self.node.build()
+        self.sync_monitors()
 
     def stop(self):
         for p in list(self.pipes.values()):
@@ -296,11 +321,17 @@ class Bridge:
                 src = self.rx_sdp(ch["id"])
                 entry["sdp_info"] = sdplib.parse(src) if src else None
                 entry["sdp_source"] = "manual" if (ch.get("manual_sdp") or "").strip() else ("in-band" if src else None)
+            res = self.node.get("receiver" if ch["dir"] == "tx" else "sender", entry["nmos_id"]) or {}
+            entry["nmos_label"] = res.get("label")
+            entry["nmos_tags"] = {k: v for k, v in (res.get("tags") or {}).items() if v}
+            entry["monitor"] = self.ncp.summary(ch["id"])
             chans.append(entry)
-        cfg = {k: v for k, v in self.cfg.items() if k not in ("channels", "conn_state", "rx_sdp_cache")}
+        cfg = {k: v for k, v in self.cfg.items() if k not in ("channels", "conn_state", "rx_sdp_cache", "annotations", "ncp_state")}
         return {
             "config": cfg, "channels": chans, "interface": self.iface(), "interfaces": list_interfaces(),
-            "node": {"id": self.node.node_id, "device_id": self.node.device_id, "api": self.node.base_url() + "/x-nmos/"},
+            "node": {"id": self.node.node_id, "device_id": self.node.device_id, "api": self.node.base_url() + "/x-nmos/",
+                     "ncp": f"ws://{self.interface_ip()}:{self.http_port()}/x-nmos/ncp/v1.0",
+                     "is12_controllers": self.ncp.controller_count()},
             "registry": {"url": self.node.registry, "via": self.node.registry_label, "status": self.node.reg_status,
                          "error": self.node.reg_error, "query": self.node.query_url()},
             "clock": self.clock.source(), "log": list(LOG)[:150],
@@ -337,6 +368,17 @@ class Bridge:
                 if not ch:
                     raise KeyError(chid)
                 d = body.get("dir", ch["dir"])
+                if "label" in body and body["label"] != ch["label"]:
+                    ids = [self.node.receiver_id(chid)] if ch["dir"] == "tx" else \
+                          [self.node.sender_id(chid), self.node.uid("source", chid), self.node.uid("flow", chid)]
+                    for rid in ids:
+                        a = self.cfg.get("annotations", {}).get(rid)
+                        if a:
+                            a.pop("label", None)
+                            if not a:
+                                self.cfg["annotations"].pop(rid, None)
+                    for role in (f"receiver-monitor-{chid}", f"sender-monitor-{chid}"):
+                        self.cfg.get("ncp_state", {}).get("monitors", {}).get(role, {}).pop("userLabel", None)
                 new = merge(ch, body)
                 new["dir"], new["id"] = ch["dir"], ch["id"]
                 self.cfg["channels"][self.cfg["channels"].index(ch)] = new
@@ -376,6 +418,10 @@ class Bridge:
                 raise KeyError(chid)
             self.cfg["channels"].remove(ch)
             self.cfg["rx_sdp_cache"].pop(chid, None)
+            for rid in (self.node.receiver_id(chid), self.node.sender_id(chid), self.node.uid("source", chid), self.node.uid("flow", chid)):
+                self.cfg.get("annotations", {}).pop(rid, None)
+            for role in (f"receiver-monitor-{chid}", f"sender-monitor-{chid}"):
+                self.cfg.get("ncp_state", {}).get("monitors", {}).pop(role, None)
             self.rx_sdps.pop(chid, None)
             for rid in (self.node.receiver_id(chid), self.node.sender_id(chid)):
                 self.cfg["conn_state"].pop(rid, None)
@@ -475,6 +521,8 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):
+        if self.path.rstrip("/") == "/x-nmos/ncp/v1.0" and ServerWebSocket.is_upgrade(self):
+            return BRIDGE.ncp.serve(self)
         self._route("GET")
 
     def do_POST(self):
@@ -572,6 +620,21 @@ class Handler(BaseHTTPRequestHandler):
                     patch["transport_params"] = [tp]
                 code, res = b.node.internal_patch("sender", chid, patch)
                 return self._send(code, res)
+            if parts[2:] == ["monitor"] and method == "POST":
+                m = b.ncp.monitors.get(chid)
+                if not m:
+                    return self._send(404, {"error": "no monitor"})
+                body = body or {}
+                with b.ncp.lock:
+                    if body.get("reset"):
+                        b.ncp._reset(m)
+                        b.ncp._overall(m)
+                    if "delay" in body:
+                        b.ncp._set(m, b.ncp.models.property(m.class_id, 3, 3), 3, 3, int(body["delay"]))
+                    if "auto_reset" in body:
+                        b.ncp._set(m, b.ncp.models.property(m.class_id, 4, 14), 4, 14, bool(body["auto_reset"]))
+                b.ncp.flush()
+                return self._send(200, b.ncp.summary(chid))
             if parts[2:] == ["sdp"] and method == "GET":
                 if ch["dir"] == "rx":
                     txt = b.node.transport_file(b.node.sender_id(chid))
@@ -601,6 +664,7 @@ def main():
     httpd.daemon_threads = True
     log("info", f"AES67 SRT Bridge on http://{BRIDGE.interface_ip()}:{port}/ (interface {BRIDGE.interface_name()}, data {DATA_DIR})")
     BRIDGE.apply()
+    BRIDGE.health.start()
     threading.Thread(target=BRIDGE.node.run, daemon=True, name="registration").start()
     import signal
 

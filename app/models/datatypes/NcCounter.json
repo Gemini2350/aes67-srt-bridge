@@ -1,0 +1,33 @@
+{
+    "description": "Counter data type",
+    "name": "NcCounter",
+    "type": 2,
+    "fields": [
+        {
+            "description": "Counter name",
+            "name": "name",
+            "typeName": "NcString",
+            "isNullable": false,
+            "isSequence": false,
+            "constraints": null
+        },
+        {
+            "description": "Counter value",
+            "name": "value",
+            "typeName": "NcUint64",
+            "isNullable": false,
+            "isSequence": false,
+            "constraints": null
+        },
+        {
+            "description": "Optional counter description",
+            "name": "description",
+            "typeName": "NcString",
+            "isNullable": true,
+            "isSequence": false,
+            "constraints": null
+        }
+    ],
+    "parentType": null,
+    "constraints": null
+}

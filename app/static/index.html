@@ -50,6 +50,20 @@ dialog h3{margin-top:0}
 pre{background:var(--code);padding:8px;border-radius:6px;overflow:auto;max-height:300px;font-size:12px}
 .srtlog{max-height:90px;overflow:auto;background:var(--code);border-radius:6px;padding:4px 6px;margin-top:8px;font-size:11px}
 .tag{font-size:11px;padding:1px 7px;border-radius:5px;background:var(--code);color:var(--muted)}
+.mon{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
+.mon .head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
+.st{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:600;background:var(--code);color:var(--muted)}
+.st.s1{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.st.s2{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+.st.s3{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}
+.doms{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px}
+.dom{background:var(--code);border-radius:6px;padding:4px 6px;font-size:11px;min-width:0}
+.dom b{display:block;font-size:11px;color:var(--muted);font-weight:500}
+.dom .msg{color:var(--muted);overflow-wrap:anywhere}
+.monset{display:flex;gap:8px;align-items:center;margin-top:6px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+.monset input[type=number]{width:60px;padding:2px 5px}
+.monset input[type=checkbox]{width:auto}
+@media (max-width:600px){.doms{grid-template-columns:repeat(2,1fr)}}
 @media (max-width:600px){.grid{grid-template-columns:1fr}.row,.row3{grid-template-columns:1fr}main{padding:10px}}
 </style>
 </head>
@@ -60,6 +74,7 @@ pre{background:var(--code);padding:8px;border-radius:6px;overflow:auto;max-heigh
   <span class="pill" id="ifPill">interface</span>
   <span class="pill" id="clkPill">clock</span>
   <span class="pill mono" id="nodePill"></span>
+  <span class="pill mono" id="ncpPill" title="IS-12 control endpoint (BCP-008 monitors)"></span>
 </header>
 <main>
   <section>
@@ -200,6 +215,27 @@ function srtBlock(s, dir) {
     <div>Loss / retx / drop</div><div>${lost ?? '–'} / ${retr ?? '–'} / ${drop ?? '–'}${dir === 'rx' && s.recv_belated != null ? ` · belated ${s.recv_belated}` : ''}</div>`;
 }
 
+const DOM_LABEL = {link: 'Link', connection: 'Connection', transmission: 'Transmission', sync: 'Sync', stream: 'Stream', essence: 'Essence'};
+function monBlock(ch) {
+  const m = ch.monitor; if (!m) return '';
+  const doms = Object.entries(m.domains).map(([n, d]) =>
+    `<div class="dom"><b>${DOM_LABEL[n] || n}${d.transitions ? ` · ${d.transitions}×` : ''}</b><span class="st s${d.code}">${esc(d.status)}</span>
+     ${d.message ? `<div class="msg">${esc(d.message)}</div>` : ''}</div>`).join('');
+  return `<div class="mon"><div class="head"><span class="muted">BCP-008</span><span class="st s${m.overall_code}">${esc(m.overall)}</span>
+    ${m.overall_message ? `<span class="muted" style="font-size:12px">${esc(m.overall_message)}</span>` : ''}
+    <span style="flex:1"></span><span class="tag" title="IS-12 oid / role">oid ${m.oid} · ${esc(m.role)}${m.subscribers ? ` · ${m.subscribers} sub` : ''}</span></div>
+    <div class="doms">${doms}</div>
+    <div class="monset">reporting delay <input type="number" min="0" value="${m.delay}" onchange="monSet('${ch.id}',{delay:+this.value})"> s
+      <label class="chk" style="margin:0"><input type="checkbox" ${m.auto_reset ? 'checked' : ''} onchange="monSet('${ch.id}',{auto_reset:this.checked})"> auto reset on activation</label>
+      <button onclick="monSet('${ch.id}',{reset:true})">Reset counters</button></div></div>`;
+}
+async function monSet(id, body) { try { await api('POST', `/api/channels/${id}/monitor`, body) } catch (e) { alert(e.message) } refresh() }
+function nmosLabel(ch) {
+  const tags = Object.entries(ch.nmos_tags || {}).filter(([k]) => !k.startsWith('urn:x-nmos:tag:grouphint'));
+  return (ch.nmos_label && ch.nmos_label !== ch.label ? `<div>NMOS label</div><div>${esc(ch.nmos_label)} <span class="tag">IS-13</span></div>` : '') +
+    (tags.length ? `<div>Tags</div><div>${tags.map(([k, v]) => `<span class="tag">${esc(k.replace('urn:x-nmos:tag:', ''))}=${esc(v.join(','))}</span>`).join(' ')}</div>` : '');
+}
+
 function srtTarget(ch) {
   const s = ch.srt;
   return s.mode === 'listener' ? `listen :${s.port}` : `${esc(s.host)}:${s.port}`;
@@ -215,7 +251,9 @@ function renderTx(ch) {
     <div>Input</div><div>${st ? `${st.receiving ? '<b style="color:var(--ok)">receiving</b>' : 'no packets'} · ${st.packets} pkts` : 'disabled'}</div>
     ${st ? srtBlock(st.srt, 'tx') : ''}
     <div>NMOS receiver</div><div class="mono">${esc(ch.nmos_id)}</div>
+    ${nmosLabel(ch)}
   </div>
+  ${monBlock(ch)}
   ${st && st.srt.lines.length ? `<div class="srtlog mono">${st.srt.lines.slice(-6).map(esc).join('<br>')}</div>` : ''}
   <div class="btns">
     <button class="primary" onclick="openConnect('${ch.id}')">Connect…</button>
@@ -238,7 +276,9 @@ function renderRx(ch) {
     <div>Timestamps</div><div>${ch.restamp ? `restamp (${esc(st ? st.clock : '')}) · err ${st ? fmt(st.restamp_err_ms) : '–'} ms · ${st ? st.restamp_resyncs : 0} resyncs` : 'pass-through'}</div>
     ${st ? srtBlock(st.srt, 'rx') : ''}
     <div>NMOS sender</div><div class="mono">${esc(ch.nmos_id)}</div>
+    ${nmosLabel(ch)}
   </div>
+  ${monBlock(ch)}
   ${st && st.srt.lines.length ? `<div class="srtlog mono">${st.srt.lines.slice(-6).map(esc).join('<br>')}</div>` : ''}
   <div class="btns">
     ${a.master_enable ? `<button onclick="act('POST','/api/channels/${ch.id}/output',{enable:false})">Output off</button>`
@@ -258,6 +298,8 @@ function render() {
   $('ifPill').textContent = `${S.interface.name} ${S.interface.ip}`;
   $('clkPill').textContent = S.clock;
   $('nodePill').innerHTML = `<a href="${esc(S.node.api)}" target="_blank" style="color:inherit">node ${esc(S.node.id.slice(0, 8))}</a>`;
+  $('ncpPill').textContent = `IS-12 ${S.node.is12_controllers} controller${S.node.is12_controllers === 1 ? '' : 's'}`;
+  $('ncpPill').title = S.node.ncp;
   const tx = S.channels.filter(c => c.dir === 'tx'), rx = S.channels.filter(c => c.dir === 'rx');
   $('txList').innerHTML = tx.map(renderTx).join('') || '<div class="muted">No TX channels.</div>';
   $('rxList').innerHTML = rx.map(renderRx).join('') || '<div class="muted">No RX channels.</div>';
@@ -377,7 +419,10 @@ async function showSdp(id) {
 async function refresh() {
   try { S = await api('GET', '/api/state'); render() } catch (e) { $('regPill').innerHTML = `<span class="dot bad"></span>GUI backend unreachable` }
 }
-refresh(); setInterval(() => { if (!document.querySelector('dialog[open]')) refresh() }, 1500);
+refresh(); setInterval(() => {
+  const a = document.activeElement;
+  if (!document.querySelector('dialog[open]') && !(a && a.closest && a.closest('.monset'))) refresh();
+}, 1500);
 </script>
 </body>
 </html>

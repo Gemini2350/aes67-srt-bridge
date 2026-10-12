@@ -52,8 +52,10 @@ new_version = _Version()
 
 def http(method: str, url: str, body=None, timeout: float = 4.0):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers={"Content-Type": "application/json", "Accept": "application/json"})
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             raw = r.read()
@@ -121,6 +123,11 @@ class Node:
         self.res: dict[str, dict] = {}            # "type/id" -> resource
         self.registry: str | None = None          # .../x-nmos/registration/v1.3
         self.registry_label = ""
+        self.candidates: list[tuple[str, str]] = []   # discovered registries not tried yet, by priority
+        self.node_fresh = True                    # first node registration with the current registry
+        self.ever_registered = False              # failover: heartbeat first, re-register only on 404
+        self.failed: dict[str, float] = {}        # registry url -> time of last failure
+        self.browser = dnssd.MdnsBrowser("_nmos-register._tcp")
         self.registered: set[str] = set()
         self.dirty: set[str] = set()
         self.deleted: list[tuple[str, str]] = []
@@ -159,7 +166,7 @@ class Node:
         ip, port, ifname = self.b.interface_ip(), self.b.http_port(), self.b.interface_name()
         label = cfg.get("node_label") or "AES67 SRT Bridge"
         base = self.base_url()
-        tags = {"urn:x-nmos:tag:grouphint/v1.0": []}
+        tags = {}
         want: dict[str, dict] = {}
         gmid = (cfg.get("ptp_gmid") or "").strip().lower().replace(":", "-")
         clock = ({"name": "clk0", "ref_type": "ptp", "traceable": True, "version": "IEEE1588-2008", "gmid": gmid, "locked": True}
@@ -168,7 +175,8 @@ class Node:
             "id": self.node_id, "label": label, "description": "AES67 over SRT bridge (srt-live-transmit)", "tags": {},
             "href": base + "/", "hostname": socket.gethostname(),
             "api": {"versions": NODE_VERSIONS, "endpoints": [{"host": ip, "port": port, "protocol": "http", "authorization": False}]},
-            "caps": {}, "services": [], "clocks": [clock],
+            "caps": {}, "clocks": [clock],
+            "services": [{"href": f"{base}/x-nmos/annotation/v1.0/", "type": "urn:x-nmos:service:annotation/v1.0", "authorization": False}],
             "interfaces": [{"chassis_id": None, "port_id": mac_of(ifname), "name": ifname}],
         }
         senders, receivers = [], []
@@ -221,8 +229,11 @@ class Node:
             "id": self.device_id, "label": label, "description": "AES67 over SRT bridge", "tags": {},
             "type": "urn:x-nmos:device:generic", "node_id": self.node_id, "senders": senders, "receivers": receivers,
             "controls": [{"href": f"{base}/x-nmos/connection/{v}/", "type": f"urn:x-nmos:control:sr-ctrl/{v}", "authorization": False}
-                         for v in CONN_VERSIONS],
+                         for v in CONN_VERSIONS]
+                        + [{"href": f"ws://{ip}:{port}/x-nmos/ncp/v1.0", "type": "urn:x-nmos:control:ncp/v1.0", "authorization": False}],
         }
+        for r in want.values():
+            self.annotate(r)
         with self.lock:
             for key, r in want.items():
                 old = self.res.get(key)
@@ -262,27 +273,43 @@ class Node:
         return None
 
     # ------------------------------------------------------------------ registration
-    def find_registry(self) -> str | None:
+    def find_registries(self) -> list[tuple[str, str]]:
+        """[(registration url, label)] in the order to try them (DNS-SD: by priority, random among equal ones)."""
+        import random
         cfg = self.b.config()
         reg = cfg.get("registry") or {}
         if reg.get("mode") == "manual" and reg.get("url"):
             url = reg["url"].rstrip("/")
             if "/x-nmos/registration" not in url:
                 url += f"/x-nmos/registration/{REG_VERSION}"
-            self.registry_label = "manual"
-            return url
+            return [(url, "manual")]
         found = []
         for service in ("_nmos-register._tcp", "_nmos-registration._tcp"):
             found = dnssd.discover(mdns=reg.get("mdns", True), unicast=True, extra_domains=reg.get("domains") or [], service=service,
-                                  servers=[x for x in [(reg.get("dns_server") or "").strip()] if x])
-            found = [f for f in found if not f["api_ver"] or REG_VERSION in f["api_ver"]] or found
+                                  servers=[x for x in [(reg.get("dns_server") or "").strip()] if x], wait=1.5)
+            found = [f for f in found if f["api_proto"] == "http" and (not f["api_ver"] or REG_VERSION in f["api_ver"])]
             if found:
                 break
-        if not found:
-            return None
-        best = found[0]
-        self.registry_label = f"DNS-SD {best['name']} ({best['source']}, pri {best['pri']})"
-        return f"{best['base']}/x-nmos/registration/{REG_VERSION}"
+        random.shuffle(found)
+        now = time.time()
+        recently_failed = lambda f: now - self.failed.get(f"{f['base']}/x-nmos/registration/{REG_VERSION}", 0) < 30
+        found.sort(key=lambda f: (recently_failed(f), f["pri"]))
+        return [(f"{f['base']}/x-nmos/registration/{REG_VERSION}", f"DNS-SD {f['name']} ({f['source']}, pri {f['pri']})")
+                for f in found]
+
+    def fast_candidates(self) -> list[tuple[str, str]]:
+        """Registries already known from passive mDNS browsing that did not fail recently (instant failover)."""
+        reg = self.b.config().get("registry") or {}
+        if reg.get("mode") == "manual" or not reg.get("mdns", True):
+            return []
+        now = time.time()
+        out = []
+        for f in sorted(self.browser.results(), key=lambda f: f["pri"]):
+            url = f"{f['base']}/x-nmos/registration/{REG_VERSION}"
+            if f["api_proto"] != "http" or (f["api_ver"] and REG_VERSION not in f["api_ver"]) or now - self.failed.get(url, 0) < 30:
+                continue
+            out.append((url, f"DNS-SD {f['name']} (mdns, pri {f['pri']})"))
+        return out
 
     def query_url(self) -> str | None:
         reg = self.b.config().get("registry") or {}
@@ -295,21 +322,41 @@ class Node:
 
     def run(self):
         order = ["node", "device", "source", "flow", "sender", "receiver"]
-        failures = 0
+        if (self.b.config().get("registry") or {}).get("mdns", True):
+            self.browser.start()
         while self.running:
             try:
                 if not self.registry:
-                    self.reg_status = "discovering"
-                    self.registry = self.find_registry()
-                    if not self.registry:
-                        self.reg_status = "no registry found"
-                        self.wake.wait(10)
-                        self.wake.clear()
-                        continue
+                    if not self.candidates and self.ever_registered:
+                        self.candidates = self.fast_candidates()
+                    if not self.candidates:
+                        self.reg_status = "discovering"
+                        self.candidates = self.find_registries()
+                        if not self.candidates:
+                            self.reg_status = "no registry found"
+                            self.wake.wait(5)
+                            self.wake.clear()
+                            continue
+                    self.registry, self.registry_label = self.candidates.pop(0)
+                    self.node_fresh = True
+                    self.last_heartbeat = 0.0
                     self.b.log("nmos", f"registry: {self.registry} [{self.registry_label}]")
+                    known = False
+                    if self.ever_registered:
+                        # failover: registries of one system share their data, so a heartbeat may be all it takes
+                        code, _ = http("POST", f"{self.registry}/health/nodes/{self.node_id}", timeout=2)
+                        if code == 200:
+                            known = True
+                            self.node_fresh = False
+                            self.last_heartbeat = time.time()
+                        elif code != 404:
+                            raise RuntimeError(f"heartbeat -> {code}")
                     with self.lock:
-                        self.registered.clear()
-                        self.dirty = set(self.res)
+                        if known:
+                            self.registered = set(self.res)
+                        else:
+                            self.registered.clear()
+                            self.dirty = set(self.res)
                 # deletions
                 with self.lock:
                     deleted, self.deleted = self.deleted, []
@@ -318,6 +365,7 @@ class Node:
                 # (re)registrations, parents first
                 with self.lock:
                     pending = sorted(self.dirty, key=lambda k: order.index(k.split("/")[0]))
+                stale = False
                 for key in pending:
                     rtype = key.split("/")[0]
                     with self.lock:
@@ -325,7 +373,19 @@ class Node:
                     if r is None:
                         continue
                     code, body = http("POST", f"{self.registry}/resource", {"type": rtype, "data": r})
+                    if rtype == "node" and code == 200 and self.node_fresh:
+                        # the registry still holds our node from an earlier run: remove it and register cleanly
+                        self.b.log("nmos", "stale node in registry (200 on first registration): deleting and re-registering")
+                        http("DELETE", f"{self.registry}/resource/nodes/{r['id']}")
+                        self.node_fresh = False
+                        stale = True
+                        with self.lock:
+                            self.registered.clear()
+                            self.dirty = set(self.res)
+                        break
                     if code in (200, 201):
+                        if rtype == "node":
+                            self.node_fresh = False
                         with self.lock:
                             if self.res.get(key, {}).get("version") == r["version"]:
                                 self.dirty.discard(key)
@@ -336,6 +396,8 @@ class Node:
                         raise RuntimeError("node conflict (409), re-registering")
                     else:
                         raise RuntimeError(f"POST {rtype} -> {code} {str(body)[:200]}")
+                if stale:
+                    continue
                 # heartbeat
                 if time.time() - self.last_heartbeat >= 5:
                     code, body = http("POST", f"{self.registry}/health/nodes/{self.node_id}")
@@ -348,20 +410,21 @@ class Node:
                     if code != 200:
                         raise RuntimeError(f"heartbeat -> {code}")
                     self.last_heartbeat = time.time()
-                failures = 0
-                self.reg_status = "registered"
-                self.reg_error = ""
+                if not self.dirty:
+                    self.reg_status = "registered"
+                    self.reg_error = ""
+                    self.ever_registered = True
             except (OSError, RuntimeError, ValueError) as e:
-                failures += 1
+                # registry failed (5xx, unreachable, rejected): fail over to the next one, rediscover when none is left
                 self.reg_error = str(e)
                 self.reg_status = "error"
-                self.b.log("error", f"registration: {e}")
-                if failures >= 3:
-                    self.b.log("nmos", "registry unreachable, rediscovering")
-                    self.registry = None
-                    failures = 0
-                self.wake.wait(3)
-                self.wake.clear()
+                self.b.log("error", f"registration with {self.registry}: {e}")
+                if self.registry:
+                    self.failed[self.registry] = time.time()
+                self.registry = None
+                if not self.candidates and all(time.time() - t < 30 for t in self.failed.values()) and len(self.failed) > 3:
+                    self.wake.wait(2)              # everything known is failing: do not hammer the network
+                    self.wake.clear()
                 continue
             self.wake.wait(max(0.1, 5 - (time.time() - self.last_heartbeat)))
             self.wake.clear()
@@ -380,6 +443,7 @@ class Node:
                 pass
 
     def reset_registry(self):
+        self.candidates = []
         self.registry = None
         self.wake.set()
 
@@ -420,6 +484,18 @@ class Node:
         st = self.conn_state(rid, kind)
         if not isinstance(body, dict):
             return 400, {"code": 400, "error": "body must be an object", "debug": None}
+        allowed = {"master_enable", "activation", "transport_params"} | (
+            {"sender_id", "transport_file"} if kind == "receiver" else {"receiver_id"})
+        extra = set(body) - allowed
+        if extra:
+            return 400, {"code": 400, "error": f"unknown properties: {sorted(extra)}", "debug": None}
+        act = body.get("activation")
+        if act is not None and (not isinstance(act, dict) or set(act) - {"mode", "requested_time"} or act.get("mode") not in (
+                None, "activate_immediate", "activate_scheduled_absolute", "activate_scheduled_relative")):
+            return 400, {"code": 400, "error": "invalid activation object", "debug": None}
+        for key in ("sender_id", "receiver_id"):
+            if body.get(key) is not None and not isinstance(body[key], str):
+                return 400, {"code": 400, "error": f"{key} must be a string or null", "debug": None}
         with self.lock:
             staged = copy.deepcopy(st.staged)
             if kind == "receiver":
@@ -546,7 +622,11 @@ class Node:
         parts = [p for p in path.split("/") if p]
         J = "application/json"
         if parts == ["x-nmos"]:
-            return 200, ["node/", "connection/"], J
+            return 200, ["node/", "connection/", "annotation/"], J
+        if len(parts) >= 2 and parts[1] == "annotation":
+            return self._annotation(method, parts[2:], body)
+        if len(parts) == 6 and parts[1] == "node" and parts[3] == "receivers" and parts[5] == "target" and method == "PUT":
+            return self._receiver_target(parts[4], body)
         if len(parts) >= 2 and parts[1] == "node":
             if method != "GET":
                 return 405, {"code": 405, "error": "method not allowed", "debug": None}, J
@@ -569,6 +649,152 @@ class Node:
         if len(parts) >= 2 and parts[1] == "connection":
             return self._connection(method, parts[2:], body)
         return 404, {"code": 404, "error": "not found", "debug": None}, J
+
+    def _receiver_target(self, rid: str, body):
+        """Deprecated IS-04 connection: PUT a sender object (or {} to disconnect) to /receivers/{id}/target."""
+        J = "application/json"
+        chid = self.find_channel("receiver", rid)
+        if chid is None:
+            return 404, {"code": 404, "error": "not found", "debug": None}, J
+        if not isinstance(body, dict):
+            return 400, {"code": 400, "error": "body must be a sender object or {}", "debug": None}, J
+
+        def work():
+            try:
+                if not body:
+                    self.internal_patch("receiver", chid, {"sender_id": None, "master_enable": False,
+                                                           "transport_file": {"data": None, "type": None}})
+                    return
+                href = body.get("manifest_href")
+                if not href:
+                    self.b.log("error", f"target PUT for receiver {rid[:8]}: sender has no manifest_href")
+                    return
+                with urllib.request.urlopen(href, timeout=5) as r:
+                    sdp_text = r.read().decode("utf-8", errors="replace")
+                self.internal_patch("receiver", chid, {"sender_id": body.get("id"), "master_enable": True,
+                                                       "transport_file": {"data": sdp_text, "type": SDP_TYPE}})
+            except Exception as e:      # noqa: BLE001
+                self.b.log("error", f"target PUT for receiver {rid[:8]}: {e}")
+        threading.Thread(target=work, daemon=True).start()
+        return 202, body, J
+
+    # ------------------------------------------------------------------ IS-13
+    def annotate(self, r: dict):
+        """Apply stored IS-13 annotations (label, description, tags) on top of the generated resource."""
+        a = (self.b.config().get("annotations") or {}).get(r["id"])
+        if not a:
+            return
+        if a.get("label") is not None:
+            r["label"] = a["label"]
+        if a.get("description") is not None:
+            r["description"] = a["description"]
+        tags = dict(r.get("tags") or {})
+        for k, v in (a.get("tags") or {}).items():
+            tags[k] = v
+        r["tags"] = tags
+
+    def _annotation(self, method, parts, body):
+        J = "application/json"
+        nf = (404, {"code": 404, "error": "not found", "debug": None}, J)
+        if not parts:
+            return (200, ["v1.0/"], J) if method == "GET" else (405, {"code": 405, "error": "method not allowed", "debug": None}, J)
+        if parts[0] != "v1.0":
+            return nf
+        if len(parts) == 1:
+            return 200, ["node/"], J
+        if parts[1] != "node":
+            return nf
+        if len(parts) == 2:
+            return 200, ["self/", "sources/", "flows/", "devices/", "senders/", "receivers/"], J
+        m = {"self": "node", "sources": "source", "flows": "flow", "devices": "device", "senders": "sender", "receivers": "receiver"}
+        coll = parts[2]
+        if coll not in m:
+            return nf
+        core = lambda r: {k: r[k] for k in ("id", "version", "label", "description", "tags")}
+        if coll == "self":
+            if len(parts) != 3:
+                return nf
+            rid = self.node_id
+        else:
+            if len(parts) == 3:
+                if method != "GET":
+                    return 405, {"code": 405, "error": "method not allowed", "debug": None}, J
+                return 200, [core(r) for r in self.get(m[coll])], J
+            if len(parts) != 4:
+                return nf
+            rid = parts[3]
+        r = self.get(m[coll], rid)
+        if not r:
+            return nf
+        if method == "GET":
+            return 200, core(r), J
+        if method != "PATCH":
+            return 405, {"code": 405, "error": "method not allowed", "debug": None}, J
+        error = self._validate_annotation(body)
+        if error:
+            return 400, {"code": 400, "error": error, "debug": None}, J
+        too_big = self._too_big(body)
+        if too_big:
+            return 500, {"code": 500, "error": too_big, "debug": None}, J
+        with self.lock:
+            store = self.b.config().setdefault("annotations", {})
+            a = store.setdefault(rid, {})
+            for k in ("label", "description"):
+                if k in body:
+                    if body[k] is None:
+                        a.pop(k, None)
+                    else:
+                        a[k] = body[k]
+            if "tags" in body:
+                if body["tags"] is None:
+                    a.pop("tags", None)
+                else:
+                    tags = a.setdefault("tags", {})
+                    for k, v in body["tags"].items():
+                        if v is None:
+                            tags.pop(k, None)
+                        else:
+                            tags[k] = v
+                    if not tags:
+                        a.pop("tags", None)
+            if not a:
+                store.pop(rid, None)
+            self.b.save()
+        self.b.log("is13", f"{m[coll]} {rid[:8]} annotated: {json.dumps(body)[:200]}")
+        self.build()
+        self.b.annotations_changed()
+        return 200, core(self.get(m[coll], rid)), J
+
+    @staticmethod
+    def _validate_annotation(body) -> str | None:
+        if not isinstance(body, dict):
+            return "body must be a JSON object"
+        extra = set(body) - {"label", "description", "tags"}
+        if extra:
+            return f"unsupported properties: {sorted(extra)}"
+        for k in ("label", "description"):
+            if k in body and body[k] is not None and not isinstance(body[k], str):
+                return f"{k} must be a string or null"
+        if "tags" in body and body["tags"] is not None:
+            if not isinstance(body["tags"], dict):
+                return "tags must be an object or null"
+            for k, v in body["tags"].items():
+                if v is not None and (not isinstance(v, list) or not all(isinstance(x, str) for x in v)):
+                    return f"tag {k} must be an array of strings or null"
+        return None
+
+    @staticmethod
+    def _too_big(body) -> str | None:
+        for k in ("label", "description"):
+            if isinstance(body.get(k), str) and len(body[k].encode()) > 1024:
+                return f"{k} longer than 1024 bytes"
+        tags = body.get("tags") or {}
+        if len(tags) > 64:
+            return "more than 64 tags"
+        for k, v in tags.items():
+            if len(k.encode()) > 512 or (v and (len(v) > 32 or any(len(x.encode()) > 1024 for x in v))):
+                return f"tag {k} exceeds the supported size"
+        return None
 
     def _connection(self, method, parts, body):
         J = "application/json"
@@ -619,7 +845,7 @@ class Node:
         if leaf == "constraints" and method == "GET":
             return 200, self.constraints(kind), J
         if leaf == "transporttype" and method == "GET" and parts[0] == "v1.1":
-            return 200, RTP_MCAST if kind == "sender" else RTP, J
+            return 200, RTP, J
         if leaf == "active" and method == "GET":
             with self.lock:
                 return 200, copy.deepcopy(st.active), J

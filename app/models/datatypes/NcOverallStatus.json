@@ -1,0 +1,28 @@
+{
+    "description": "Overall status enum data type",
+    "name": "NcOverallStatus",
+    "type": 3,
+    "items": [
+        {
+            "description": "Inactive",
+            "name": "Inactive",
+            "value": 0
+        },
+        {
+            "description": "The overall status is healthy",
+            "name": "Healthy",
+            "value": 1
+        },
+        {
+            "description": "The overall status is partially healthy",
+            "name": "PartiallyHealthy",
+            "value": 2
+        },
+        {
+            "description": "The overall status is unhealthy",
+            "name": "Unhealthy",
+            "value": 3
+        }
+    ],
+    "constraints": null
+}

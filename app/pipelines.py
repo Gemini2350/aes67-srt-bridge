@@ -23,6 +23,8 @@ import zlib
 from collections import deque
 from urllib.parse import quote
 
+from sdp import parse as sdp_parse
+
 MAGIC = b"AES67SRT"
 SLT = os.environ.get("SRT_LIVE_TRANSMIT", "srt-live-transmit")
 LOCAL_BASE_PORT = int(os.environ.get("LOCAL_BASE_PORT", "41000"))
@@ -78,6 +80,7 @@ class SrtProcess:
         self.proc: subprocess.Popen | None = None
         self.stats: dict = {}
         self.stats_ts = 0.0
+        self.totals: dict[str, int] = {}       # srt-live-transmit reports interval values: accumulated here
         self.lines: deque = deque(maxlen=50)
         self.running = False
         self.restarts = 0
@@ -130,6 +133,11 @@ class SrtProcess:
                     try:
                         self.stats = json.loads(line)
                         self.stats_ts = time.time()
+                        for d in ("send", "recv"):
+                            for k in ("packets", "packetsLost", "packetsDropped", "packetsRetransmitted", "packetsBelated"):
+                                v = (self.stats.get(d) or {}).get(k)
+                                if isinstance(v, (int, float)):
+                                    self.totals[f"{d}_{k}"] = self.totals.get(f"{d}_{k}", 0) + int(v)
                     except ValueError:
                         pass
                 elif line:
@@ -167,14 +175,15 @@ class SrtProcess:
         link = s.get("link") or {}
         snd = s.get("send") or {}
         rcv = s.get("recv") or {}
+        t = self.totals
         return {
             "state": self.state, "restarts": self.restarts, "stats_fresh": fresh,
             "rtt_ms": link.get("rtt"), "bandwidth_mbps": link.get("bandwidth"),
             "send_mbps": snd.get("mbitRate") if fresh else 0, "recv_mbps": rcv.get("mbitRate") if fresh else 0,
-            "send_lost": snd.get("packetsLost"), "send_retrans": snd.get("packetsRetransmitted"),
-            "send_dropped": snd.get("packetsDropped"),
-            "recv_lost": rcv.get("packetsLost"), "recv_retrans": rcv.get("packetsRetransmitted"),
-            "recv_dropped": rcv.get("packetsDropped"), "recv_belated": rcv.get("packetsBelated"),
+            "send_lost": t.get("send_packetsLost", 0), "send_retrans": t.get("send_packetsRetransmitted", 0),
+            "send_dropped": t.get("send_packetsDropped", 0),
+            "recv_lost": t.get("recv_packetsLost", 0), "recv_retrans": t.get("recv_packetsRetransmitted", 0),
+            "recv_dropped": t.get("recv_packetsDropped", 0), "recv_belated": t.get("recv_packetsBelated", 0),
             "lines": list(self.lines)[-12:],
         }
 
@@ -196,6 +205,7 @@ class TxPipeline:
         self.packets = 0
         self.bytes = 0
         self.last_rx = 0.0
+        self.rtp = RtpStats()
         self.thread: threading.Thread | None = None
 
     def start(self):
@@ -221,6 +231,8 @@ class TxPipeline:
             self.source = source
             if not source:
                 return
+            info = sdp_parse(source.get("sdp") or "")
+            self.rtp.reset_expectation(info.get("payload_type"), info.get("encoding"), info.get("channels"))
             try:
                 self.sock = open_rx_socket(source["multicast_ip"], int(source["port"]), self.interface_ip, source.get("source_ip"))
                 self.log("tx", f"{self.ch['label']}: joined {source.get('source_ip') or '*'} -> {source['multicast_ip']}:{source['port']}")
@@ -251,6 +263,7 @@ class TxPipeline:
                     self.packets += 1
                     self.bytes += len(data)
                     self.last_rx = time.time()
+                    self.rtp.check(data)
                     self._send(data)
             except BlockingIOError:
                 pass
@@ -265,7 +278,7 @@ class TxPipeline:
 
     def status(self) -> dict:
         return {"source": {k: v for k, v in (self.source or {}).items() if k != "sdp"} if self.source else None,
-                "packets": self.packets, "bytes": self.bytes,
+                "packets": self.packets, "bytes": self.bytes, "rtp": self.rtp.snapshot(),
                 "receiving": time.time() - self.last_rx < 1.0, "srt": self.slt.summary()}
 
 
@@ -301,7 +314,9 @@ class RxPipeline:
         self.err_ms = 0.0
         self.packets_in = 0
         self.packets_out = 0
+        self.send_errors = 0
         self.last_rx = 0.0
+        self.rtp = RtpStats()
         self.thread: threading.Thread | None = None
 
     def start(self):
@@ -324,6 +339,10 @@ class RxPipeline:
             self.log("rx", f"{self.ch['label']}: output {'-> %s:%d' % dest if dest else 'off'}")
         self.dest = dest
         self.delta = None
+
+    def set_format(self, info: dict):
+        self.rtp.reset_expectation(info.get("payload_type"), info.get("encoding"), info.get("channels"))
+        self.set_rate(info.get("sample_rate"))
 
     def set_rate(self, rate: int | None):
         if rate and rate != self.rate:
@@ -358,6 +377,7 @@ class RxPipeline:
                 continue
             self.packets_in += 1
             self.last_rx = time.time()
+            self.rtp.check(data)
             dest = self.dest
             if not dest:
                 continue
@@ -381,14 +401,64 @@ class RxPipeline:
                 self.out.sendto(data, dest)
                 self.packets_out += 1
             except OSError:
-                pass
+                self.send_errors += 1
 
     def status(self) -> dict:
-        return {"packets_in": self.packets_in, "packets_out": self.packets_out, "receiving": time.time() - self.last_rx < 1.0,
+        return {"packets_in": self.packets_in, "packets_out": self.packets_out, "send_errors": self.send_errors,
+                "rtp": self.rtp.snapshot(), "receiving": time.time() - self.last_rx < 1.0,
                 "sdp_age_s": round(time.time() - self.sdp_ts, 1) if self.sdp_ts else None,
                 "output": f"{self.dest[0]}:{self.dest[1]}" if self.dest else None, "source_port": self.source_port,
                 "restamp": self.restamp, "restamp_resyncs": self.resyncs, "restamp_err_ms": round(self.err_ms, 2),
                 "clock": self.clock.source(), "srt": self.slt.summary()}
+
+
+# ---------------------------------------------------------------- RTP checks
+BYTES_PER_SAMPLE = {"L16": 2, "L24": 3, "L32": 4, "AM824": 4}
+
+
+class RtpStats:
+    """Cumulative counters of an RTP packet stream: sequence gaps, non-RTP packets, unexpected payload type/size."""
+
+    def __init__(self):
+        self.reset_expectation(None, None, None)
+        self.lost = self.not_rtp = self.pt_mismatch = self.size_mismatch = 0
+        self.last_pt = self.last_payload = None
+
+    def reset_expectation(self, payload_type, encoding, channels):
+        self.expect_pt = payload_type
+        bps = BYTES_PER_SAMPLE.get((encoding or "").upper())
+        self.frame_bytes = bps * channels if bps and channels else None
+        self.last_seq = None
+
+    def check(self, data: bytes) -> bool:
+        if len(data) < 12 or data[0] >> 6 != 2:
+            self.not_rtp += 1
+            return False
+        seq = (data[2] << 8) | data[3]
+        if self.last_seq is not None:
+            gap = (seq - self.last_seq - 1) & 0xFFFF
+            if 0 < gap < 3000:
+                self.lost += gap
+        if self.last_seq is None or ((seq - self.last_seq) & 0xFFFF) < 0x8000:
+            self.last_seq = seq
+        pt = data[1] & 0x7F
+        self.last_pt = pt
+        if self.expect_pt is not None and pt != self.expect_pt:
+            self.pt_mismatch += 1
+        hdr = 12 + 4 * (data[0] & 0x0F)
+        if data[0] & 0x10 and len(data) >= hdr + 4:
+            hdr += 4 + 4 * ((data[hdr + 2] << 8) | data[hdr + 3])
+        payload = len(data) - hdr
+        if data[0] & 0x20 and payload > 0:
+            payload -= data[-1]
+        self.last_payload = payload
+        if self.frame_bytes and (payload <= 0 or payload % self.frame_bytes):
+            self.size_mismatch += 1
+        return True
+
+    def snapshot(self) -> dict:
+        return {"lost": self.lost, "not_rtp": self.not_rtp, "pt_mismatch": self.pt_mismatch, "size_mismatch": self.size_mismatch,
+                "last_pt": self.last_pt, "last_payload": self.last_payload, "expect_pt": self.expect_pt, "frame_bytes": self.frame_bytes}
 
 
 # ---------------------------------------------------------------- sockets

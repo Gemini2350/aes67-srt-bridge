@@ -322,3 +322,65 @@ if __name__ == "__main__":
     import json, sys
     print(json.dumps(discover(), indent=1))
     print("resolver:", resolver_config(), file=sys.stderr)
+
+
+# ---------------------------------------------------------------- passive mDNS browser
+class MdnsBrowser:
+    """Listens to mDNS traffic (announcements, other hosts' answers, goodbyes) and keeps the records of one
+    service type fresh, so a failover can pick the next instance without a new query round."""
+
+    def __init__(self, service: str = SERVICE):
+        import threading
+        self.service = service
+        self.ptr_name = f"{service}.local".lower()
+        self.recs: dict[tuple, tuple[dict, float]] = {}    # (name, type, value) -> (record, expiry)
+        self.lock = threading.Lock()
+        self.running = False
+
+    def start(self):
+        import threading
+        if self.running:
+            return
+        self.running = True
+        threading.Thread(target=self._run, daemon=True, name=f"mdns-browse-{self.service}").start()
+
+    def _run(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "SO_REUSEPORT"):
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            s.bind(("0.0.0.0", MDNS_PORT))
+            s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, socket.inet_aton(MDNS_GROUP) + socket.inet_aton("0.0.0.0"))
+            s.settimeout(1.0)
+        except OSError:
+            self.running = False
+            return
+        while self.running:
+            try:
+                pkt, src = s.recvfrom(9000)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            now = time.time()
+            with self.lock:
+                for r in parse_records(pkt):
+                    key = (r["name"].lower(), r["type"], json_key(r))
+                    if r.get("ttl", 0) == 0:
+                        self.recs.pop(key, None)          # goodbye
+                    else:
+                        self.recs[key] = (dict(r, source_ip=src[0]), now + min(r["ttl"], 4500))
+        s.close()
+
+    def results(self) -> list[dict]:
+        now = time.time()
+        with self.lock:
+            for k in [k for k, (_, exp) in self.recs.items() if exp < now]:
+                del self.recs[k]
+            recs = [r for r, _ in self.recs.values()]
+        return _assemble(recs, f"{self.service}.local", "mdns", self.service)
+
+
+def json_key(r: dict) -> str:
+    return str(r.get("value") or r.get("target") or r.get("address") or sorted((r.get("txt") or {}).items()))

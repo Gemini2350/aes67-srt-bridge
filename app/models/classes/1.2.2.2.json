@@ -1,0 +1,234 @@
+{
+  "description": "Sender monitor class descriptor",
+  "classId": [
+    1,
+    2,
+    2,
+    2
+  ],
+  "name": "NcSenderMonitor",
+  "fixedRole": null,
+  "properties": [
+    {
+      "description": "Link status property",
+      "id": {
+        "level": 4,
+        "index": 1
+      },
+      "name": "linkStatus",
+      "typeName": "NcLinkStatus",
+      "isReadOnly": true,
+      "isNullable": false,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "Link status message property",
+      "id": {
+        "level": 4,
+        "index": 2
+      },
+      "name": "linkStatusMessage",
+      "typeName": "NcString",
+      "isReadOnly": true,
+      "isNullable": true,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "Link status transition counter property",
+      "id": {
+        "level": 4,
+        "index": 3
+      },
+      "name": "linkStatusTransitionCounter",
+      "typeName": "NcUint64",
+      "isReadOnly": true,
+      "isNullable": false,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "Transmission status property",
+      "id": {
+        "level": 4,
+        "index": 4
+      },
+      "name": "transmissionStatus",
+      "typeName": "NcTransmissionStatus",
+      "isReadOnly": true,
+      "isNullable": false,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "Transmission status message property",
+      "id": {
+        "level": 4,
+        "index": 5
+      },
+      "name": "transmissionStatusMessage",
+      "typeName": "NcString",
+      "isReadOnly": true,
+      "isNullable": true,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "Transmission status transition counter property",
+      "id": {
+        "level": 4,
+        "index": 6
+      },
+      "name": "transmissionStatusTransitionCounter",
+      "typeName": "NcUint64",
+      "isReadOnly": true,
+      "isNullable": false,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "External synchronization status property",
+      "id": {
+        "level": 4,
+        "index": 7
+      },
+      "name": "externalSynchronizationStatus",
+      "typeName": "NcSynchronizationStatus",
+      "isReadOnly": true,
+      "isNullable": false,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "External synchronization status message property",
+      "id": {
+        "level": 4,
+        "index": 8
+      },
+      "name": "externalSynchronizationStatusMessage",
+      "typeName": "NcString",
+      "isReadOnly": true,
+      "isNullable": true,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "External synchronization status transition counter property",
+      "id": {
+        "level": 4,
+        "index": 9
+      },
+      "name": "externalSynchronizationStatusTransitionCounter",
+      "typeName": "NcUint64",
+      "isReadOnly": true,
+      "isNullable": false,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "Synchronization source id property",
+      "id": {
+        "level": 4,
+        "index": 10
+      },
+      "name": "synchronizationSourceId",
+      "typeName": "NcString",
+      "isReadOnly": true,
+      "isNullable": true,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "Essence status property",
+      "id": {
+        "level": 4,
+        "index": 11
+      },
+      "name": "essenceStatus",
+      "typeName": "NcEssenceStatus",
+      "isReadOnly": true,
+      "isNullable": false,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "Essence status message property",
+      "id": {
+        "level": 4,
+        "index": 12
+      },
+      "name": "essenceStatusMessage",
+      "typeName": "NcString",
+      "isReadOnly": true,
+      "isNullable": true,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "Essence status transition counter property",
+      "id": {
+        "level": 4,
+        "index": 13
+      },
+      "name": "essenceStatusTransitionCounter",
+      "typeName": "NcUint64",
+      "isReadOnly": true,
+      "isNullable": false,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "Automatic reset counters and status messages property (default: true)",
+      "id": {
+        "level": 4,
+        "index": 14
+      },
+      "name": "autoResetCountersAndMessages",
+      "typeName": "NcBoolean",
+      "isReadOnly": false,
+      "isNullable": false,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    }
+  ],
+  "methods": [
+    {
+      "description": "Gets the transmission error counters",
+      "id": {
+        "level": 4,
+        "index": 1
+      },
+      "name": "GetTransmissionErrorCounters",
+      "resultDatatype": "NcMethodResultCounters",
+      "parameters": [],
+      "isDeprecated": false
+    },
+    {
+      "description": "Resets ALL counters and status messages",
+      "id": {
+        "level": 4,
+        "index": 2
+      },
+      "name": "ResetCountersAndMessages",
+      "resultDatatype": "NcMethodResult",
+      "parameters": [],
+      "isDeprecated": false
+    }
+  ],
+  "events": []
+}

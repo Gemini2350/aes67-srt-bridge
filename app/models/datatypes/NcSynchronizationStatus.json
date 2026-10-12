@@ -1,0 +1,28 @@
+{
+    "description": "Synchronization status enum data type",
+    "name": "NcSynchronizationStatus",
+    "type": 3,
+    "items": [
+        {
+            "description": "Feature not in use",
+            "name": "NotUsed",
+            "value": 0
+        },
+        {
+            "description": "Locked to a synchronization source",
+            "name": "Healthy",
+            "value": 1
+        },
+        {
+            "description": "Partially locked to a synchronization source",
+            "name": "PartiallyHealthy",
+            "value": 2
+        },
+        {
+            "description": "Not locked to a synchronization source",
+            "name": "Unhealthy",
+            "value": 3
+        }
+    ],
+    "constraints": null
+}

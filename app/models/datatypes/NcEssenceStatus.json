@@ -1,0 +1,28 @@
+{
+    "description": "Essence status enum data type",
+    "name": "NcEssenceStatus",
+    "type": 3,
+    "items": [
+        {
+            "description": "Inactive",
+            "name": "Inactive",
+            "value": 0
+        },
+        {
+            "description": "Active and healthy",
+            "name": "Healthy",
+            "value": 1
+        },
+        {
+            "description": "Active and partially healthy",
+            "name": "PartiallyHealthy",
+            "value": 2
+        },
+        {
+            "description": "Active and unhealthy",
+            "name": "Unhealthy",
+            "value": 3
+        }
+    ],
+    "constraints": null
+}

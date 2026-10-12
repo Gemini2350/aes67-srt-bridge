@@ -1,0 +1,56 @@
+{
+  "description": "Baseline status monitoring class",
+  "classId": [
+    1,
+    2,
+    2
+  ],
+  "name": "NcStatusMonitor",
+  "fixedRole": null,
+  "properties": [
+    {
+      "description": "Overall status property",
+      "id": {
+        "level": 3,
+        "index": 1
+      },
+      "name": "overallStatus",
+      "typeName": "NcOverallStatus",
+      "isReadOnly": true,
+      "isNullable": false,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "Overall status message property",
+      "id": {
+        "level": 3,
+        "index": 2
+      },
+      "name": "overallStatusMessage",
+      "typeName": "NcString",
+      "isReadOnly": true,
+      "isNullable": true,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    },
+    {
+      "description": "Status reporting delay property (in seconds, default is 3s and 0 means no delay)",
+      "id": {
+        "level": 3,
+        "index": 3
+      },
+      "name": "statusReportingDelay",
+      "typeName": "NcUint32",
+      "isReadOnly": false,
+      "isNullable": false,
+      "isSequence": false,
+      "isDeprecated": false,
+      "constraints": null
+    }
+  ],
+  "methods": [],
+  "events": []
+}

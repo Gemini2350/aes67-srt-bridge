@@ -1,0 +1,7 @@
+The JSON class and datatype descriptors in this directory are copied unchanged from
+
+  AMWA MS-05-02 NMOS Control Framework        https://github.com/AMWA-TV/ms-05-02          (models/)
+  AMWA NMOS Control Feature Sets: Monitoring   https://github.com/AMWA-TV/nmos-control-feature-sets (monitoring/models/)
+
+Copyright (c) AMWA, licensed under the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0).

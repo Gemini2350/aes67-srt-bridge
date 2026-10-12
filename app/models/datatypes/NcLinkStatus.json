@@ -1,0 +1,23 @@
+{
+    "description": "Link status enum data type",
+    "name": "NcLinkStatus",
+    "type": 3,
+    "items": [
+        {
+            "description": "All the associated network interfaces are up",
+            "name": "AllUp",
+            "value": 1
+        },
+        {
+            "description": "Some of the associated network interfaces are down",
+            "name": "SomeDown",
+            "value": 2
+        },
+        {
+            "description": "All the associated network interfaces are down",
+            "name": "AllDown",
+            "value": 3
+        }
+    ],
+    "constraints": null
+}
