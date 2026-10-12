@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AES67 SRT Bridge</title>
+<link rel="icon" href="favicon.svg">
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--fg:#1d2330;--muted:#6b7385;--line:#e1e4ea;--acc:#2f6fdf;--ok:#1f9d55;--warn:#d98a00;--bad:#d64545;--code:#f0f2f5}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2128;--fg:#e6e8ec;--muted:#949bab;--line:#2d333d;--acc:#5b93f5;--ok:#38b56d;--warn:#e6a23c;--bad:#ef6464;--code:#262b33}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:12px 20px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+header h1{font-size:17px;margin:0 12px 0 0}
+main{max-width:1250px;margin:0 auto;padding:16px}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:99px;background:var(--code);font-size:12px;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
+section{margin-bottom:22px}
+section>h2{font-size:15px;margin:0 0 10px;display:flex;gap:10px;align-items:center}
+section>h2 small{color:var(--muted);font-weight:normal}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.card h3{margin:0 0 6px;font-size:15px;display:flex;align-items:center;gap:8px}
+.card h3 .sp{flex:1}
+.kv{display:grid;grid-template-columns:120px 1fr;gap:2px 10px;font-size:13px}
+.kv>div:nth-child(odd){color:var(--muted)}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.btns{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+button{font:inherit;border:1px solid var(--line);background:var(--code);color:var(--fg);border-radius:7px;padding:5px 11px;cursor:pointer}
+button:hover{border-color:var(--acc)}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button.danger{color:var(--bad)}
+input,select,textarea{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:5px 8px;width:100%}
+textarea{font-family:ui-monospace,Menlo,monospace;font-size:12px;min-height:150px}
+label{display:block;font-size:12px;color:var(--muted);margin:8px 0 3px}
+label.chk{display:flex;gap:6px;align-items:center;color:var(--fg);font-size:13px}
+label.chk input{width:auto}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 12px}
+details.card summary{cursor:pointer;font-weight:600}
+dialog{border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--fg);width:min(640px,94vw);padding:18px}
+dialog::backdrop{background:#0007}
+dialog h3{margin-top:0}
+.log{max-height:280px;overflow:auto;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.log div{padding:1px 0;border-bottom:1px solid var(--line)}
+.log .error{color:var(--bad)}
+.muted{color:var(--muted)}
+.hint{font-size:12px;color:var(--muted);margin-top:6px}
+pre{background:var(--code);padding:8px;border-radius:6px;overflow:auto;max-height:300px;font-size:12px}
+.srtlog{max-height:90px;overflow:auto;background:var(--code);border-radius:6px;padding:4px 6px;margin-top:8px;font-size:11px}
+.tag{font-size:11px;padding:1px 7px;border-radius:5px;background:var(--code);color:var(--muted)}
+@media (max-width:600px){.grid{grid-template-columns:1fr}.row,.row3{grid-template-columns:1fr}main{padding:10px}}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">AES67 SRT Bridge</h1>
+  <span class="pill" id="regPill"><span class="dot"></span>registry</span>
+  <span class="pill" id="ifPill">interface</span>
+  <span class="pill" id="clkPill">clock</span>
+  <span class="pill mono" id="nodePill"></span>
+</header>
+<main>
+  <section>
+    <details class="card" id="settingsBox">
+      <summary>Settings – node, interface, registry, PTP</summary>
+      <div class="row">
+        <div><label>Node label</label><input id="s_label"></div>
+        <div><label>Media / NMOS interface</label><select id="s_iface"></select></div>
+      </div>
+      <div class="row">
+        <div><label>Registry discovery</label>
+          <select id="s_regmode"><option value="auto">DNS-SD (unicast + mDNS)</option><option value="manual">Manual URL</option></select></div>
+        <div><label>Registry URL (manual)</label><input id="s_regurl" placeholder="http://10.0.0.10:8010"></div>
+      </div>
+      <div class="row">
+        <div><label>Unicast DNS-SD domains (in addition to the host's search domains)</label><input id="s_domains" placeholder="office.int"></div>
+        <div><label>Query API URL (optional, default: same host as registration)</label><input id="s_query" placeholder="http://10.0.0.10:8010"></div>
+      </div>
+      <div class="row">
+        <div><label>DNS server for DNS-SD (optional, default: host resolver)</label><input id="s_dns" placeholder="10.0.100.1"></div>
+        <div><label>&nbsp;</label><label class="chk"><input type="checkbox" id="s_mdns"> also use mDNS</label></div>
+      </div>
+      <div class="row3">
+        <div><label>PTP grandmaster id (IS-04 clock)</label><input id="s_gmid" placeholder="ec-46-70-ff-fe-00-12-34"></div>
+        <div><label>Clock for RTP restamping</label>
+          <select id="s_clk"><option value="auto">auto (CLOCK_TAI if set)</option><option value="tai">CLOCK_TAI</option><option value="realtime">CLOCK_REALTIME + offset</option></select></div>
+        <div><label>TAI − UTC offset (s)</label><input id="s_utc" type="number"></div>
+      </div>
+      <div class="btns">
+        <button class="primary" onclick="saveSettings()">Save</button>
+        <button onclick="discover()">Discover registries</button>
+        <button onclick="api('POST','/api/reregister').then(refresh)">Re-register</button>
+      </div>
+      <div id="discoverOut"></div>
+    </details>
+  </section>
+
+  <section>
+    <h2>SRT TX <small>virtual NMOS receivers – the connected AES67 multicast is sent via SRT</small>
+      <span style="flex:1"></span><button class="primary" onclick="editChannel('tx')">+ TX channel</button></h2>
+    <div class="grid" id="txList"></div>
+  </section>
+
+  <section>
+    <h2>SRT RX <small>virtual NMOS senders – SRT is re-sent as multicast with the rewritten source SDP</small>
+      <span style="flex:1"></span><button class="primary" onclick="editChannel('rx')">+ RX channel</button></h2>
+    <div class="grid" id="rxList"></div>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <div class="card log" id="log"></div>
+  </section>
+</main>
+
+<dialog id="chDlg">
+  <h3 id="chTitle">Channel</h3>
+  <form id="chForm" onsubmit="return false">
+    <div class="row">
+      <div><label>Label (also NMOS label)</label><input name="label" required></div>
+      <div><label>Enabled</label><select name="enabled"><option value="true">yes</option><option value="false">no</option></select></div>
+    </div>
+    <div class="row3">
+      <div><label>SRT mode</label><select name="srt.mode"><option value="caller">caller</option><option value="listener">listener</option></select></div>
+      <div><label>SRT host (caller)</label><input name="srt.host" placeholder="remote.example.com"></div>
+      <div><label>SRT port</label><input name="srt.port" type="number" required></div>
+    </div>
+    <div class="row3">
+      <div><label>Latency (ms)</label><input name="srt.latency" type="number"></div>
+      <div><label>Passphrase (10–79 chars, empty = off)</label><input name="srt.passphrase" type="password" autocomplete="off"></div>
+      <div><label>Key length</label><select name="srt.pbkeylen"><option>16</option><option>24</option><option>32</option></select></div>
+    </div>
+    <div><label>Stream ID (caller, optional)</label><input name="srt.streamid"></div>
+    <div id="rxFields">
+      <div class="row3">
+        <div><label>Output multicast</label><input name="out.dest_ip" placeholder="239.69.10.1"></div>
+        <div><label>Output port</label><input name="out.dest_port" type="number"></div>
+        <div><label>TTL</label><input name="out.ttl" type="number"></div>
+      </div>
+      <div class="row3">
+        <div><label>RTP timestamps</label><select name="restamp"><option value="false">pass through (shared PTP/GNSS)</option><option value="true">restamp to local PTP time</option></select></div>
+        <div><label>Restamp resync tolerance (ms)</label><input name="resync_ms" type="number"></div>
+        <div><label>Enable output when SDP arrives</label><select name="auto_enable"><option value="true">yes</option><option value="false">no</option></select></div>
+      </div>
+      <label>Override a=ts-refclk (optional, e.g. ptp=IEEE1588-2008:EC-46-70-FF-FE-00-12-34:0)</label><input name="refclk">
+      <label>Manual source SDP (optional – otherwise received in-band from the TX side)</label><textarea name="manual_sdp" style="min-height:90px"></textarea>
+    </div>
+    <div class="btns"><button class="primary" onclick="saveChannel()">Save</button><button onclick="chDlg.close()">Cancel</button></div>
+    <div class="hint" id="chErr" style="color:var(--bad)"></div>
+  </form>
+</dialog>
+
+<dialog id="conDlg">
+  <h3>Connect TX channel</h3>
+  <label>AES67 sender from the registry</label>
+  <select id="conSender"><option value="">loading…</option></select>
+  <label>… or paste an SDP</label>
+  <textarea id="conSdp" placeholder="v=0&#10;o=- ..."></textarea>
+  <div class="btns"><button class="primary" onclick="doConnect()">Connect (IS-05 activate)</button><button onclick="conDlg.close()">Cancel</button></div>
+  <div class="hint" id="conErr" style="color:var(--bad)"></div>
+</dialog>
+
+<dialog id="sdpDlg">
+  <h3 id="sdpTitle">SDP</h3>
+  <div id="sdpBody"></div>
+  <div class="btns"><button onclick="sdpDlg.close()">Close</button></div>
+</dialog>
+
+<script>
+let S = null, editing = null, connecting = null;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function api(method, url, body) {
+  const r = await fetch(url, {method, headers: {'Content-Type': 'application/json'}, body: body === undefined ? undefined : JSON.stringify(body)});
+  const t = await r.text(); let j; try { j = JSON.parse(t) } catch { j = t }
+  if (!r.ok) throw new Error((j && (j.error || j.message)) || r.status);
+  return j;
+}
+
+function fmt(n, d = 2) { return n == null ? '–' : (+n).toFixed(d) }
+
+function stateDot(st) {
+  if (!st) return 'dot';
+  const s = st.srt || {};
+  if (s.state === 'connected' && (st.receiving || st.packets_in || st.stats_fresh)) return 'dot ok';
+  if (s.state === 'connected' || s.stats_fresh) return 'dot ok';
+  if (String(s.state).startsWith('error') || String(s.state).startsWith('exited')) return 'dot bad';
+  return 'dot warn';
+}
+
+function srtBlock(s, dir) {
+  if (!s) return '';
+  const lost = dir === 'tx' ? s.send_lost : s.recv_lost, retr = dir === 'tx' ? s.send_retrans : s.recv_retrans,
+        drop = dir === 'tx' ? s.send_dropped : s.recv_dropped, rate = dir === 'tx' ? s.send_mbps : s.recv_mbps;
+  return `<div>SRT</div><div>${esc(s.state)}${s.restarts ? ` · ${s.restarts} restarts` : ''}</div>
+    <div>Link</div><div>RTT ${fmt(s.rtt_ms)} ms · ${fmt(rate, 3)} Mbit/s</div>
+    <div>Loss / retx / drop</div><div>${lost ?? '–'} / ${retr ?? '–'} / ${drop ?? '–'}${dir === 'rx' && s.recv_belated != null ? ` · belated ${s.recv_belated}` : ''}</div>`;
+}
+
+function srtTarget(ch) {
+  const s = ch.srt;
+  return s.mode === 'listener' ? `listen :${s.port}` : `${esc(s.host)}:${s.port}`;
+}
+
+function renderTx(ch) {
+  const st = ch.status, a = ch.active, tp = (a.transport_params || [])[0] || {};
+  const src = a.master_enable ? `${tp.source_ip ? esc(tp.source_ip) + ' → ' : ''}${esc(tp.multicast_ip)}:${tp.destination_port}` : '<span class="muted">not connected</span>';
+  return `<div class="card"><h3><span class="${ch.enabled ? stateDot(st) : 'dot'}"></span>${esc(ch.label)}<span class="sp"></span><span class="tag">TX → ${srtTarget(ch)}</span></h3>
+  <div class="kv">
+    <div>Source</div><div class="mono">${src}</div>
+    <div>Sender ID</div><div class="mono">${a.master_enable ? esc(a.sender_id || '(SDP only)') : '–'}</div>
+    <div>Input</div><div>${st ? `${st.receiving ? '<b style="color:var(--ok)">receiving</b>' : 'no packets'} · ${st.packets} pkts` : 'disabled'}</div>
+    ${st ? srtBlock(st.srt, 'tx') : ''}
+    <div>NMOS receiver</div><div class="mono">${esc(ch.nmos_id)}</div>
+  </div>
+  ${st && st.srt.lines.length ? `<div class="srtlog mono">${st.srt.lines.slice(-6).map(esc).join('<br>')}</div>` : ''}
+  <div class="btns">
+    <button class="primary" onclick="openConnect('${ch.id}')">Connect…</button>
+    ${a.master_enable ? `<button onclick="act('POST','/api/channels/${ch.id}/disconnect')">Disconnect</button>` : ''}
+    ${ch.has_sdp ? `<button onclick="showSdp('${ch.id}')">SDP</button>` : ''}
+    <button onclick="editChannel('tx','${ch.id}')">Edit</button>
+    <button class="danger" onclick="delChannel('${ch.id}')">Delete</button>
+  </div></div>`;
+}
+
+function renderRx(ch) {
+  const st = ch.status, a = ch.active, tp = (a.transport_params || [])[0] || {}, info = ch.sdp_info;
+  const fmtInfo = info ? `${esc(info.encoding)} / ${info.sample_rate} Hz / ${info.channels} ch / ${info.ptime ?? '?'} ms` : '<span class="muted">waiting for SDP</span>';
+  return `<div class="card"><h3><span class="${ch.enabled ? stateDot(st) : 'dot'}"></span>${esc(ch.label)}<span class="sp"></span><span class="tag">RX ← ${srtTarget(ch)}</span></h3>
+  <div class="kv">
+    <div>Source SDP</div><div>${fmtInfo}${ch.sdp_source ? ` <span class="tag">${ch.sdp_source}${st && st.sdp_age_s != null && ch.sdp_source === 'in-band' ? ' ' + st.sdp_age_s + ' s' : ''}</span>` : ''}</div>
+    <div>Original</div><div class="mono">${info ? `${esc(info.source_ip || '')} → ${esc(info.multicast_ip)}:${info.port}` : '–'}</div>
+    <div>Output</div><div class="mono">${a.master_enable ? `<b style="color:var(--ok)">ON</b>` : '<span class="muted">off</span>'} ${esc(tp.source_ip)} → ${esc(tp.destination_ip)}:${tp.destination_port}</div>
+    <div>Packets</div><div>${st ? `${st.packets_in} in · ${st.packets_out} out ${st.receiving ? '· <b style="color:var(--ok)">receiving</b>' : ''}` : 'disabled'}</div>
+    <div>Timestamps</div><div>${ch.restamp ? `restamp (${esc(st ? st.clock : '')}) · err ${st ? fmt(st.restamp_err_ms) : '–'} ms · ${st ? st.restamp_resyncs : 0} resyncs` : 'pass-through'}</div>
+    ${st ? srtBlock(st.srt, 'rx') : ''}
+    <div>NMOS sender</div><div class="mono">${esc(ch.nmos_id)}</div>
+  </div>
+  ${st && st.srt.lines.length ? `<div class="srtlog mono">${st.srt.lines.slice(-6).map(esc).join('<br>')}</div>` : ''}
+  <div class="btns">
+    ${a.master_enable ? `<button onclick="act('POST','/api/channels/${ch.id}/output',{enable:false})">Output off</button>`
+                      : `<button class="primary" onclick="act('POST','/api/channels/${ch.id}/output',{enable:true})">Output on</button>`}
+    <button onclick="showSdp('${ch.id}')">SDP</button>
+    <button onclick="editChannel('rx','${ch.id}')">Edit</button>
+    <button class="danger" onclick="delChannel('${ch.id}')">Delete</button>
+  </div></div>`;
+}
+
+function render() {
+  const c = S.config, r = S.registry;
+  $('title').textContent = c.node_label || 'AES67 SRT Bridge';
+  const rcls = r.status === 'registered' ? 'ok' : r.status === 'error' ? 'bad' : 'warn';
+  $('regPill').innerHTML = `<span class="dot ${rcls}"></span>${esc(r.status)}${r.url ? ' · ' + esc(r.url.split('/x-nmos')[0]) : ''}`;
+  $('regPill').title = (r.via || '') + (r.error ? '\n' + r.error : '');
+  $('ifPill').textContent = `${S.interface.name} ${S.interface.ip}`;
+  $('clkPill').textContent = S.clock;
+  $('nodePill').innerHTML = `<a href="${esc(S.node.api)}" target="_blank" style="color:inherit">node ${esc(S.node.id.slice(0, 8))}</a>`;
+  const tx = S.channels.filter(c => c.dir === 'tx'), rx = S.channels.filter(c => c.dir === 'rx');
+  $('txList').innerHTML = tx.map(renderTx).join('') || '<div class="muted">No TX channels.</div>';
+  $('rxList').innerHTML = rx.map(renderRx).join('') || '<div class="muted">No RX channels.</div>';
+  $('log').innerHTML = S.log.map(l => `<div class="${l.kind === 'error' ? 'error' : ''}">${l.ts} [${esc(l.kind)}] ${esc(l.text)}</div>`).join('');
+  if (!$('settingsBox').dataset.filled) fillSettings();
+}
+
+function fillSettings() {
+  const c = S.config;
+  $('s_label').value = c.node_label || '';
+  $('s_iface').innerHTML = `<option value="">auto (default route)</option>` + S.interfaces.map(i => `<option value="${esc(i.name)}">${esc(i.name)} – ${esc(i.ip)}</option>`).join('');
+  $('s_iface').value = c.interface || '';
+  $('s_regmode').value = c.registry.mode; $('s_regurl').value = c.registry.url || '';
+  $('s_domains').value = (c.registry.domains || []).join(' '); $('s_query').value = c.registry.query_url || '';
+  $('s_mdns').checked = c.registry.mdns !== false; $('s_dns').value = c.registry.dns_server || '';
+  $('s_gmid').value = c.ptp_gmid || ''; $('s_clk').value = c.clock.mode || 'auto'; $('s_utc').value = c.clock.utc_offset ?? 37;
+  $('settingsBox').dataset.filled = 1;
+}
+
+async function saveSettings() {
+  await api('POST', '/api/settings', {
+    node_label: $('s_label').value, interface: $('s_iface').value, ptp_gmid: $('s_gmid').value,
+    registry: {mode: $('s_regmode').value, url: $('s_regurl').value, domains: $('s_domains').value, query_url: $('s_query').value, dns_server: $('s_dns').value, mdns: $('s_mdns').checked},
+    clock: {mode: $('s_clk').value, utc_offset: +$('s_utc').value || 37},
+  }).catch(e => alert(e.message));
+  delete $('settingsBox').dataset.filled;
+  refresh();
+}
+
+async function discover() {
+  $('discoverOut').innerHTML = '<div class="hint">searching…</div>';
+  try {
+    const d = await api('POST', '/api/discover');
+    $('discoverOut').innerHTML = `<div class="hint">nameservers: ${esc(d.nameservers.join(', ') || '–')} · domains: ${esc(d.domains.join(', ') || '–')}</div>` +
+      (d.results.length ? `<pre>${d.results.map(r => `${r.service.padEnd(20)} ${r.name}  ${r.url}  pri ${r.pri}  [${r.source}]`).map(esc).join('\n')}</pre>` : '<div class="hint">nothing found</div>');
+  } catch (e) { $('discoverOut').innerHTML = `<div class="hint">${esc(e.message)}</div>` }
+}
+
+function setField(form, name, value) {
+  const el = form.elements[name]; if (!el) return;
+  el.value = value === undefined || value === null ? '' : String(value);
+}
+
+function editChannel(dir, id) {
+  const ch = id ? S.channels.find(c => c.id === id) : null;
+  editing = {dir, id};
+  $('chTitle').textContent = (id ? 'Edit ' : 'New ') + (dir === 'tx' ? 'TX channel (virtual receiver)' : 'RX channel (virtual sender)');
+  $('rxFields').style.display = dir === 'rx' ? '' : 'none';
+  const f = $('chForm'); f.reset(); $('chErr').textContent = '';
+  const d = ch || {label: dir === 'tx' ? 'SRT TX ' : 'SRT RX ', enabled: true,
+    srt: {mode: dir === 'tx' ? 'caller' : 'listener', host: '', port: 9000, latency: 120, passphrase: '', pbkeylen: 16, streamid: ''},
+    out: {dest_ip: '239.69.10.1', dest_port: 5004, ttl: 32}, restamp: false, resync_ms: 20, auto_enable: true, refclk: '', manual_sdp: ''};
+  setField(f, 'label', d.label); setField(f, 'enabled', d.enabled !== false);
+  for (const k of ['mode', 'host', 'port', 'latency', 'passphrase', 'pbkeylen', 'streamid']) setField(f, 'srt.' + k, d.srt[k]);
+  if (dir === 'rx') {
+    for (const k of ['dest_ip', 'dest_port', 'ttl']) setField(f, 'out.' + k, d.out[k]);
+    for (const k of ['restamp', 'resync_ms', 'auto_enable', 'refclk', 'manual_sdp']) setField(f, k, d[k]);
+  }
+  chDlg.showModal();
+}
+
+async function saveChannel() {
+  const f = $('chForm'), v = n => f.elements[n].value;
+  const body = {dir: editing.dir, label: v('label'), enabled: v('enabled') === 'true',
+    srt: {mode: v('srt.mode'), host: v('srt.host'), port: +v('srt.port'), latency: +v('srt.latency') || 120,
+          passphrase: v('srt.passphrase'), pbkeylen: +v('srt.pbkeylen'), streamid: v('srt.streamid')}};
+  if (editing.dir === 'rx') Object.assign(body, {
+    out: {dest_ip: v('out.dest_ip'), dest_port: +v('out.dest_port') || 5004, ttl: +v('out.ttl') || 32},
+    restamp: v('restamp') === 'true', resync_ms: +v('resync_ms') || 20, auto_enable: v('auto_enable') === 'true',
+    refclk: v('refclk'), manual_sdp: v('manual_sdp')});
+  try {
+    await api(editing.id ? 'PUT' : 'POST', editing.id ? `/api/channels/${editing.id}` : '/api/channels', body);
+    chDlg.close(); refresh();
+  } catch (e) { $('chErr').textContent = e.message }
+}
+
+async function delChannel(id) {
+  const ch = S.channels.find(c => c.id === id);
+  if (confirm(`Delete channel "${ch.label}"? Its NMOS resource is removed from the registry.`)) act('DELETE', `/api/channels/${id}`);
+}
+
+async function act(m, url, body) {
+  try { await api(m, url, body) } catch (e) { alert(e.message) }
+  refresh();
+}
+
+async function openConnect(id) {
+  connecting = id; $('conErr').textContent = ''; $('conSdp').value = '';
+  $('conSender').innerHTML = '<option value="">loading…</option>';
+  conDlg.showModal();
+  try {
+    const list = await api('GET', '/api/registry/senders');
+    $('conSender').innerHTML = '<option value="">– select –</option>' + list.filter(s => !s.own)
+      .map(s => `<option value="${esc(s.id)}">${esc(s.node)} · ${esc(s.label)} (${esc(s.media_type || '')})</option>`).join('');
+  } catch (e) { $('conSender').innerHTML = '<option value="">registry not available</option>'; $('conErr').textContent = e.message }
+}
+
+async function doConnect() {
+  const sid = $('conSender').value, sdp = $('conSdp').value.trim();
+  if (!sid && !sdp) { $('conErr').textContent = 'select a sender or paste an SDP'; return }
+  try {
+    await api('POST', `/api/channels/${connecting}/connect`, sdp ? {sdp, sender_id: sid || null} : {sender_id: sid});
+    conDlg.close(); refresh();
+  } catch (e) { $('conErr').textContent = e.message }
+}
+
+async function showSdp(id) {
+  const ch = S.channels.find(c => c.id === id);
+  const d = await api('GET', `/api/channels/${id}/sdp`);
+  $('sdpTitle').textContent = `SDP – ${ch.label}`;
+  $('sdpBody').innerHTML = (ch.dir === 'rx'
+    ? `<label>Original (from the TX side)</label><pre>${esc(d.source || 'not received yet')}</pre><label>Published by the virtual sender (transport file)</label><pre>${esc(d.output || '–')}</pre>`
+    : `<label>Connected source</label><pre>${esc(d.source || '–')}</pre>`);
+  sdpDlg.showModal();
+}
+
+async function refresh() {
+  try { S = await api('GET', '/api/state'); render() } catch (e) { $('regPill').innerHTML = `<span class="dot bad"></span>GUI backend unreachable` }
+}
+refresh(); setInterval(() => { if (!document.querySelector('dialog[open]')) refresh() }, 1500);
+</script>
+</body>
+</html>

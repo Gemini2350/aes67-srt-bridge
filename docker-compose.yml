@@ -1,0 +1,12 @@
+services:
+  aes67-srt-bridge:
+    image: ghcr.io/gemini2350/aes67-srt-bridge:latest
+    # build: .                  # use this instead of "image" to build from a local checkout
+    container_name: aes67-srt-bridge
+    network_mode: host          # multicast, IGMP and NMOS need the real interfaces
+    restart: unless-stopped
+    environment:
+      HTTP_PORT: "8095"         # web GUI + NMOS node/connection API
+      # MEDIA_INTERFACE: ens34  # default interface on first start (changeable in the GUI)
+    volumes:
+      - ./data:/data
