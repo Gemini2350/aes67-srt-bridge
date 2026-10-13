@@ -5,8 +5,11 @@ services:
     container_name: aes67-srt-bridge
     network_mode: host          # multicast, IGMP and NMOS need the real interfaces
     restart: unless-stopped
+    security_opt:
+      - apparmor:unconfined     # Docker's default AppArmor profile blocks D-Bus; needed for "Flush host DNS cache"
     environment:
       HTTP_PORT: "8095"         # web GUI + NMOS node/connection API
       # MEDIA_INTERFACE: ens34  # default interface on first start (changeable in the GUI)
     volumes:
       - ./data:/data
+      - /run/dbus:/run/dbus:ro    # host D-Bus: "Flush host DNS cache" button (systemd-resolved)

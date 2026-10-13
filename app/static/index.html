@@ -107,6 +107,7 @@ pre{background:var(--code);padding:8px;border-radius:6px;overflow:auto;max-heigh
         <button class="primary" onclick="saveSettings()">Save</button>
         <button onclick="discover()">Discover registries</button>
         <button onclick="api('POST','/api/reregister').then(refresh)">Re-register</button>
+        <button onclick="flushDns()" title="systemd-resolved on the Docker host + the bridge's own DNS-SD caches">Flush host DNS cache</button>
       </div>
       <div id="discoverOut"></div>
     </details>
@@ -326,6 +327,15 @@ async function saveSettings() {
     clock: {mode: $('s_clk').value, utc_offset: +$('s_utc').value || 37},
   }).catch(e => alert(e.message));
   delete $('settingsBox').dataset.filled;
+  refresh();
+}
+
+async function flushDns() {
+  $('discoverOut').innerHTML = '<div class="hint">flushing…</div>';
+  try {
+    const r = await api('POST', '/api/dns/flush');
+    $('discoverOut').innerHTML = `<div class="hint" style="color:${r.ok ? 'var(--ok)' : 'var(--warn)'}">${esc(r.message)}</div>`;
+  } catch (e) { $('discoverOut').innerHTML = `<div class="hint" style="color:var(--bad)">${esc(e.message)}</div>` }
   refresh();
 }
 

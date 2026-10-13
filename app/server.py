@@ -24,6 +24,7 @@ from urllib.parse import urlparse, parse_qs
 
 import dnssd
 import health
+import hostdns
 import ncp
 import nmos_node
 import pipelines
@@ -576,6 +577,18 @@ class Handler(BaseHTTPRequestHandler):
             if (reg.get("dns_server") or "").strip():
                 srv = [reg["dns_server"].strip()]
             return self._send(200, {"results": res, "nameservers": srv, "domains": dom + (reg.get("domains") or [])})
+        if parts == ["dns", "flush"] and method == "POST":
+            res = hostdns.flush()
+            # caches of the bridge itself: passively learned mDNS records, failed registries, pending candidates
+            with b.node.browser.lock:
+                b.node.browser.recs.clear()
+            b.node.failed.clear()
+            res["message"] += "; bridge DNS-SD caches cleared"
+            if (b.cfg.get("registry") or {}).get("mode") != "manual":
+                b.node.reset_registry()
+                res["message"] += ", registry discovery restarted"
+            log("dns", res["message"])
+            return self._send(200, res)
         if parts == ["reregister"] and method == "POST":
             b.node.reset_registry()
             return self._send(200, {"ok": True})

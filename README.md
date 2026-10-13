@@ -56,6 +56,20 @@ offsets. This requires the RX host clock to be disciplined to PTP (ptp4l + phc2s
 `CLOCK_TAI` if the kernel TAI offset is set, otherwise `CLOCK_REALTIME + 37 s` (configurable). If the
 deviation exceeds the resync tolerance (default 20 ms), the offset is recomputed and logged.
 
+## Flush host DNS cache
+
+Settings → "Flush host DNS cache" calls `FlushCaches` on the host's **systemd-resolved** via D-Bus, the same as
+`resolvectl flush-caches`. It also clears the bridge's own DNS-SD caches (passively learned mDNS records, failed
+registries) and restarts registry discovery (heartbeat first, so no re-registration if the registry stays the same).
+Requirements are in `docker-compose.yml`:
+
+* `/run/dbus:/run/dbus:ro`: the host's system bus.
+* `security_opt: apparmor:unconfined`: on AppArmor hosts (Ubuntu), Docker's default profile blocks D-Bus from
+  containers. Remove both lines if you do not need the button. It then reports what is missing.
+
+Hosts without systemd-resolved (e.g. nscd or dnsmasq as cache) are reported as such. Those caches cannot be
+reached from the container.
+
 ## Status monitoring (IS-12, BCP-008)
 
 IS-12 endpoint: `ws://<host>:8095/x-nmos/ncp/v1.0`, advertised as `urn:x-nmos:control:ncp/v1.0` in the IS-04 device.

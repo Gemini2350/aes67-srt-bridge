@@ -1,6 +1,6 @@
 FROM debian:bookworm-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends srt-tools python3 iproute2 coreutils ca-certificates \
+ && apt-get install -y --no-install-recommends srt-tools python3 iproute2 coreutils ca-certificates dbus-bin \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY app/ /app/
