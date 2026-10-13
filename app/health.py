@@ -1,9 +1,8 @@
 """Derives the BCP-008 domain statuses of every channel once per second from the pipeline measurements.
 
-TX channel -> NcReceiverMonitor (the virtual receiver's job is: multicast in, SRT out)
+TX channel -> NcReceiverMonitor (reception only: the multicast input; the SRT link is not part of it)
   link          interface operstate
-  connection    no multicast packets / SRT not connected / lost or dropped packets -> Unhealthy,
-                SRT retransmissions (loss recovery in use) -> PartiallyHealthy
+  connection    no multicast packets / RTP sequence gaps on the multicast input -> Unhealthy
   stream        not RTP -> Unhealthy, payload type or payload size not matching the SDP -> PartiallyHealthy
   sync          NotUsed, source "internal" (the bridge forwards packets, it does not lock to PTP itself)
 
@@ -81,28 +80,19 @@ class Health:
         cur = self._flat(st)
         prev = self.prev.get(ch["id"], cur)
         self.prev[ch["id"]] = cur
-        srt = st["srt"]
         src = st.get("source") or {}
         group = f"{src.get('multicast_ip')}:{src.get('port')}" if src else "?"
-        target = f"{ch['srt'].get('host') or 'listener'}:{ch['srt'].get('port')}"
         packets = _delta(cur, prev, "packets")
         lost = _delta(cur, prev, "lost")
-        dropped = _delta(cur, prev, "srt_send_dropped")
-        retrans = _delta(cur, prev, "srt_send_retrans")
         not_rtp = _delta(cur, prev, "not_rtp")
         pt_bad = _delta(cur, prev, "pt_mismatch")
         size_bad = _delta(cur, prev, "size_mismatch")
 
+        # reception only: whether the multicast arrives completely (the SRT link is shown in the GUI, not here)
         if packets == 0:
             connection = (UNHEALTHY, f"no packets received from {group}")
-        elif srt["state"] != "connected":
-            connection = (UNHEALTHY, f"SRT link to {target} not connected ({srt['state']})")
-        elif lost or dropped:
-            parts = ([f"{lost} packets lost on the multicast input"] if lost else []) + \
-                    ([f"SRT dropped {dropped} packets"] if dropped else [])
-            connection = (UNHEALTHY, ", ".join(parts))
-        elif retrans:
-            connection = (PARTIAL, f"SRT recovered losses by retransmitting {retrans} packets")
+        elif lost:
+            connection = (UNHEALTHY, f"{lost} packets lost on the multicast input from {group}")
         else:
             connection = (HEALTHY, None)
 
@@ -118,9 +108,7 @@ class Health:
         else:
             stream = (HEALTHY, None)
 
-        counters = {"lost": {"multicast input": (lost, "RTP sequence gaps on the multicast input"),
-                             "srt dropped": (dropped, "packets dropped by SRT (too late to send)")},
-                    "late": {}}
+        counters = {"lost": {"multicast input": (lost, "RTP sequence gaps on the multicast input")}, "late": {}}
         self.b.ncp.evaluate(ch["id"], {"link": link, "connection": connection, "stream": stream, "sync": (INACTIVE, None)},
                             counters)
 

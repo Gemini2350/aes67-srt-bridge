@@ -80,10 +80,10 @@ For each status domain, the bridge reports what it can actually measure:
 | TX channel → NcReceiverMonitor | |
 |---|---|
 | linkStatus | operstate of the media interface |
-| connectionStatus | Unhealthy: no multicast packets, SRT not connected, RTP sequence gaps or SRT drops. PartiallyHealthy: SRT had to retransmit (loss recovery in use) |
+| connectionStatus | reception only: Unhealthy when no multicast packets arrive or RTP sequence gaps occur on the multicast input. The SRT link (state, retransmissions, drops) is not part of it; the GUI shows it per channel |
 | streamStatus | Unhealthy: not RTP. PartiallyHealthy: payload type or payload size does not match the SDP |
 | externalSynchronizationStatus | NotUsed, `synchronizationSourceId` = `internal` (the bridge forwards packets and does not lock to PTP) |
-| GetLostPacketCounters | RTP sequence gaps on the multicast input, SRT drops |
+| GetLostPacketCounters | RTP sequence gaps on the multicast input |
 
 | RX channel → NcSenderMonitor | |
 |---|---|
