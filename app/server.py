@@ -637,16 +637,11 @@ class Handler(BaseHTTPRequestHandler):
                 m = b.ncp.monitors.get(chid)
                 if not m:
                     return self._send(404, {"error": "no monitor"})
-                body = body or {}
-                with b.ncp.lock:
-                    if body.get("reset"):
+                if (body or {}).get("reset"):
+                    with b.ncp.lock:
                         b.ncp._reset(m)
                         b.ncp._overall(m)
-                    if "delay" in body:
-                        b.ncp._set(m, b.ncp.models.property(m.class_id, 3, 3), 3, 3, int(body["delay"]))
-                    if "auto_reset" in body:
-                        b.ncp._set(m, b.ncp.models.property(m.class_id, 4, 14), 4, 14, bool(body["auto_reset"]))
-                b.ncp.flush()
+                    b.ncp.flush()
                 return self._send(200, b.ncp.summary(chid))
             if parts[2:] == ["sdp"] and method == "GET":
                 if ch["dir"] == "rx":

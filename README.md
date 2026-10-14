@@ -94,8 +94,11 @@ For each status domain, the bridge reports what it can actually measure:
 | GetTransmissionErrorCounters | send errors |
 
 These BCP-008 rules are implemented:
+* `statusReportingDelay` is fixed at the BCP-008 default of 3 s. It is published as a runtime constraint
+  (minimum = maximum = 3), and Set accepts only 3. `autoResetCountersAndMessages` is always true; Set accepts
+  only `true`. BCP-008 requires only these values to be settable.
 * On activation, domains with an Inactive state go to Healthy immediately. Non-healthy states are held back for
-  `statusReportingDelay` (default 3 s, settable).
+  3 s.
 * After that, a worse state is reported immediately. A better state is reported only after it has persisted for
   `statusReportingDelay`.
 * Deactivation sets connection/transmission, stream/essence and overall to Inactive immediately.
@@ -103,8 +106,7 @@ These BCP-008 rules are implemented:
 * `autoResetCountersAndMessages` resets counters and messages on every activation.
 * A recovered domain keeps its previous cause as `Previously: …`.
 
-The GUI shows the same statuses per channel. The reporting delay and auto reset can be changed there.
-`statusReportingDelay`, `autoResetCountersAndMessages` and an explicit `userLabel` are persisted.
+The GUI shows the same statuses per channel and can reset the counters. An explicit IS-12 `userLabel` is persisted.
 
 ## Annotation (IS-13)
 
@@ -151,6 +153,8 @@ receiver caps and BCP-002 tags. The testing tool has no IS-13 suite yet, so IS-1
 
 * `tools/aes67_gen.py <group> <port> [if_ip] [channels]`: L24/48 kHz/1 ms test sender, timestamps = TAI.
 * `tools/aes67_check.py <group> <port> [if_ip] [seconds]`: packet rate, sequence gaps, timestamp age.
+* `tools/rtp_compare.py <in_group> <in_port> <out_group> <out_port> [if_ip] [seconds]`: compares the stream before
+  and after the bridge byte by byte. In pass-through mode, all matched packets are identical (header, timestamp, payload).
 * `tools/is12_probe.py ws://host:8095/x-nmos/ncp/v1.0 [seconds]`: walks the IS-12 device model, checks
   descriptors and Set/Get errors, then prints notifications for the given time.
 

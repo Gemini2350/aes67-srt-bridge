@@ -47,6 +47,7 @@ SYNC_NAMES = {0: "NotUsed", 1: "Healthy", 2: "PartiallyHealthy", 3: "Unhealthy"}
 RX_DOMAINS = {"link": 1, "connection": 4, "sync": 7, "stream": 11}
 TX_DOMAINS = {"link": 1, "transmission": 4, "sync": 7, "essence": 11}
 INACTIVE_CAPABLE = {"connection", "stream", "transmission", "essence"}
+STATUS_REPORTING_DELAY = 3          # BCP-008 default; fixed (not configurable)
 
 PRIMITIVES = ["NcBoolean", "NcInt16", "NcInt32", "NcInt64", "NcUint16", "NcUint32", "NcUint64", "NcFloat32", "NcFloat64", "NcString"]
 
@@ -166,8 +167,10 @@ class Monitor(NcObj):
         self.domain_index = RX_DOMAINS if kind == "receiver" else TX_DOMAINS
         self.domains = {name: Domain(HEALTHY if name == "link" else INACTIVE) for name in self.domain_index}
         self.overall, self.overall_message = INACTIVE, None
-        self.delay = 3
+        self.delay = STATUS_REPORTING_DELAY
         self.auto_reset = True
+        self.runtime_constraints = [{"propertyId": {"level": 3, "index": 3}, "defaultValue": STATUS_REPORTING_DELAY,
+                                     "maximum": STATUS_REPORTING_DELAY, "minimum": STATUS_REPORTING_DELAY, "step": None}]
         self.enabled = True
         self.active = False
         self.activation_until = 0.0
@@ -177,6 +180,8 @@ class Monitor(NcObj):
         self.counter_desc: dict[str, str] = {}
 
     def get(self, level, index):
+        if level == 1 and index == 8:
+            return True, self.runtime_constraints
         found, v = super().get(level, index)
         if found:
             return found, v
@@ -257,8 +262,6 @@ class NcpServer:
                 saved = state.get(m.role, {})
                 m.label_override = saved.get("userLabel")
                 m.user_label = m.label_override or c["label"]
-                m.delay = int(saved.get("statusReportingDelay", 3))
-                m.auto_reset = bool(saved.get("autoResetCountersAndMessages", True))
                 self.monitors[chid] = m
             if json.dumps(self.members()) != before:
                 self._notify(1, 2, 2, self.members())
@@ -266,9 +269,7 @@ class NcpServer:
 
     def _persist(self, m: Monitor):
         state = self.b.config().setdefault("ncp_state", {}).setdefault("monitors", {})
-        state[m.role] = {"statusReportingDelay": m.delay, "autoResetCountersAndMessages": m.auto_reset}
-        if m.label_override:
-            state[m.role]["userLabel"] = m.label_override
+        state[m.role] = {"userLabel": m.label_override} if m.label_override else {}
         self.b.save()
 
     # ------------------------------------------------------------------ device manager values
@@ -613,15 +614,15 @@ class NcpServer:
         if isinstance(obj, Monitor):
             if level == 2 and index == 1:
                 return err(INVALID, "enabled has no meaning for monitors and cannot be changed")
+            # statusReportingDelay is fixed at the BCP-008 default of 3 s (published as runtime constraint 1p8),
+            # autoResetCountersAndMessages is always true – BCP-008 only requires these values to be settable
             if level == 3 and index == 3:
-                obj.delay = value
-                self._persist(obj)
-                self._notify(obj.oid, 3, 3, value)
+                if value != STATUS_REPORTING_DELAY:
+                    return err(PARAM_ERROR, f"statusReportingDelay is fixed at {STATUS_REPORTING_DELAY} s")
                 return ok(has_value=False)
             if level == 4 and index == 14:
-                obj.auto_reset = value
-                self._persist(obj)
-                self._notify(obj.oid, 4, 14, value)
+                if value is not True:
+                    return err(PARAM_ERROR, "autoResetCountersAndMessages is always enabled")
                 return ok(has_value=False)
         if obj is self.root and level == 2 and index == 1:
             return err(INVALID, "the root block cannot be disabled")

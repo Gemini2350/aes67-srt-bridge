@@ -226,9 +226,7 @@ function monBlock(ch) {
     ${m.overall_message ? `<span class="muted" style="font-size:12px">${esc(m.overall_message)}</span>` : ''}
     <span style="flex:1"></span><span class="tag" title="IS-12 oid / role">oid ${m.oid} · ${esc(m.role)}${m.subscribers ? ` · ${m.subscribers} sub` : ''}</span></div>
     <div class="doms">${doms}</div>
-    <div class="monset">reporting delay <input type="number" min="0" value="${m.delay}" onchange="monSet('${ch.id}',{delay:+this.value})"> s
-      <label class="chk" style="margin:0"><input type="checkbox" ${m.auto_reset ? 'checked' : ''} onchange="monSet('${ch.id}',{auto_reset:this.checked})"> auto reset on activation</label>
-      <button onclick="monSet('${ch.id}',{reset:true})">Reset counters</button></div></div>`;
+    <div class="monset"><button onclick="monSet('${ch.id}',{reset:true})">Reset counters</button></div></div>`;
 }
 async function monSet(id, body) { try { await api('POST', `/api/channels/${id}/monitor`, body) } catch (e) { alert(e.message) } refresh() }
 function nmosLabel(ch) {
