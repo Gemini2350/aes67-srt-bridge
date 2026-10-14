@@ -148,7 +148,13 @@ pre{background:var(--code);padding:8px;border-radius:6px;overflow:auto;max-heigh
       <div><label>Passphrase (10–79 chars, empty = off)</label><input name="srt.passphrase" type="password" autocomplete="off"></div>
       <div><label>Key length</label><select name="srt.pbkeylen"><option>16</option><option>24</option><option>32</option></select></div>
     </div>
-    <div><label>Stream ID (caller, optional)</label><input name="srt.streamid"></div>
+    <div class="row3">
+      <div><label>FEC (SRT packet filter, both sides)</label><input name="srt.packetfilter" list="fecPresets" placeholder="off">
+        <datalist id="fecPresets"><option value="fec,cols:10,rows:1">row only, ~10 % extra</option>
+          <option value="fec,cols:10,rows:5">2D 10×5, ~30 % extra</option><option value="fec,cols:20,rows:5">2D 20×5, ~25 % extra</option></datalist></div>
+      <div><label>SDP port (default: SRT port + 1)</label><input name="srt.control_port" type="number" placeholder="auto"></div>
+      <div><label>Stream ID (caller, optional)</label><input name="srt.streamid"></div>
+    </div>
     <div id="rxFields">
       <div class="row3">
         <div><label>Output multicast</label><input name="out.dest_ip" placeholder="239.69.10.1"></div>
@@ -161,7 +167,7 @@ pre{background:var(--code);padding:8px;border-radius:6px;overflow:auto;max-heigh
         <div><label>Enable output when SDP arrives</label><select name="auto_enable"><option value="true">yes</option><option value="false">no</option></select></div>
       </div>
       <label>Override a=ts-refclk (optional, e.g. ptp=IEEE1588-2008:EC-46-70-FF-FE-00-12-34:0)</label><input name="refclk">
-      <label>Manual source SDP (optional – otherwise received in-band from the TX side)</label><textarea name="manual_sdp" style="min-height:90px"></textarea>
+      <label>Manual source SDP (optional – otherwise received from the TX side over the SDP port)</label><textarea name="manual_sdp" style="min-height:90px"></textarea>
     </div>
     <div class="btns"><button class="primary" onclick="saveChannel()">Save</button><button onclick="chDlg.close()">Cancel</button></div>
     <div class="hint" id="chErr" style="color:var(--bad)"></div>
@@ -213,7 +219,8 @@ function srtBlock(s, dir) {
         drop = dir === 'tx' ? s.send_dropped : s.recv_dropped, rate = dir === 'tx' ? s.send_mbps : s.recv_mbps;
   return `<div>SRT</div><div>${esc(s.state)}${s.restarts ? ` · ${s.restarts} restarts` : ''}</div>
     <div>Link</div><div>RTT ${fmt(s.rtt_ms)} ms · ${fmt(rate, 3)} Mbit/s</div>
-    <div>Loss / retx / drop</div><div>${lost ?? '–'} / ${retr ?? '–'} / ${drop ?? '–'}${dir === 'rx' && s.recv_belated != null ? ` · belated ${s.recv_belated}` : ''}</div>`;
+    <div>Loss / retx / drop</div><div>${lost ?? '–'} / ${retr ?? '–'} / ${drop ?? '–'}${dir === 'rx' && s.recv_belated != null ? ` · belated ${s.recv_belated}` : ''}</div>
+    ${s.recv_fec_extra || s.send_fec_extra ? `<div>FEC</div><div>${dir === 'rx' ? `recovered ${s.recv_fec_recovered} · failed ${s.recv_fec_failed} · ` : ''}${dir === 'rx' ? s.recv_fec_extra : s.send_fec_extra} FEC packets</div>` : ''}`;
 }
 
 const DOM_LABEL = {link: 'Link', connection: 'Connection', transmission: 'Transmission', sync: 'Sync', stream: 'Stream', essence: 'Essence'};
@@ -236,8 +243,8 @@ function nmosLabel(ch) {
 }
 
 function srtTarget(ch) {
-  const s = ch.srt;
-  return s.mode === 'listener' ? `listen :${s.port}` : `${esc(s.host)}:${s.port}`;
+  const s = ch.srt, sdpPort = s.control_port || (+s.port + 1);
+  return (s.mode === 'listener' ? `listen :${s.port}` : `${esc(s.host)}:${s.port}`) + ` · SDP :${sdpPort}` + (s.packetfilter ? ' · FEC' : '');
 }
 
 function renderTx(ch) {
@@ -268,7 +275,7 @@ function renderRx(ch) {
   const fmtInfo = info ? `${esc(info.encoding)} / ${info.sample_rate} Hz / ${info.channels} ch / ${info.ptime ?? '?'} ms` : '<span class="muted">waiting for SDP</span>';
   return `<div class="card"><h3><span class="${ch.enabled ? stateDot(st) : 'dot'}"></span>${esc(ch.label)}<span class="sp"></span><span class="tag">RX ← ${srtTarget(ch)}</span></h3>
   <div class="kv">
-    <div>Source SDP</div><div>${fmtInfo}${ch.sdp_source ? ` <span class="tag">${ch.sdp_source}${st && st.sdp_age_s != null && ch.sdp_source === 'in-band' ? ' ' + st.sdp_age_s + ' s' : ''}</span>` : ''}</div>
+    <div>Source SDP</div><div>${fmtInfo}${ch.sdp_source ? ` <span class="tag">${ch.sdp_source}${st && st.sdp_age_s != null && ch.sdp_source === 'via SRT' ? ' ' + st.sdp_age_s + ' s' : ''}</span>` : ''}</div>
     <div>Original</div><div class="mono">${info ? `${esc(info.source_ip || '')} → ${esc(info.multicast_ip)}:${info.port}` : '–'}</div>
     <div>Output</div><div class="mono">${a.master_enable ? `<b style="color:var(--ok)">ON</b>` : '<span class="muted">off</span>'} ${esc(tp.source_ip)} → ${esc(tp.destination_ip)}:${tp.destination_port}</div>
     <div>Packets</div><div>${st ? `${st.packets_in} in · ${st.packets_out} out ${st.receiving ? '· <b style="color:var(--ok)">receiving</b>' : ''}` : 'disabled'}</div>
@@ -361,7 +368,7 @@ function editChannel(dir, id) {
     srt: {mode: dir === 'tx' ? 'caller' : 'listener', host: '', port: 9000, latency: 120, passphrase: '', pbkeylen: 16, streamid: ''},
     out: {dest_ip: '239.69.10.1', dest_port: 5004, ttl: 32}, restamp: false, resync_ms: 20, auto_enable: true, refclk: '', manual_sdp: ''};
   setField(f, 'label', d.label); setField(f, 'enabled', d.enabled !== false);
-  for (const k of ['mode', 'host', 'port', 'latency', 'passphrase', 'pbkeylen', 'streamid']) setField(f, 'srt.' + k, d.srt[k]);
+  for (const k of ['mode', 'host', 'port', 'latency', 'passphrase', 'pbkeylen', 'streamid', 'packetfilter', 'control_port']) setField(f, 'srt.' + k, d.srt[k]);
   if (dir === 'rx') {
     for (const k of ['dest_ip', 'dest_port', 'ttl']) setField(f, 'out.' + k, d.out[k]);
     for (const k of ['restamp', 'resync_ms', 'auto_enable', 'refclk', 'manual_sdp']) setField(f, k, d[k]);
@@ -373,7 +380,8 @@ async function saveChannel() {
   const f = $('chForm'), v = n => f.elements[n].value;
   const body = {dir: editing.dir, label: v('label'), enabled: v('enabled') === 'true',
     srt: {mode: v('srt.mode'), host: v('srt.host'), port: +v('srt.port'), latency: +v('srt.latency') || 120,
-          passphrase: v('srt.passphrase'), pbkeylen: +v('srt.pbkeylen'), streamid: v('srt.streamid')}};
+          passphrase: v('srt.passphrase'), pbkeylen: +v('srt.pbkeylen'), streamid: v('srt.streamid'),
+          packetfilter: v('srt.packetfilter').trim(), control_port: v('srt.control_port') ? +v('srt.control_port') : null}};
   if (editing.dir === 'rx') Object.assign(body, {
     out: {dest_ip: v('out.dest_ip'), dest_port: +v('out.dest_port') || 5004, ttl: +v('out.ttl') || 32},
     restamp: v('restamp') === 'true', resync_ms: +v('resync_ms') || 20, auto_enable: v('auto_enable') === 'true',

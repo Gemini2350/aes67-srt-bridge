@@ -16,8 +16,12 @@ represents both ends as NMOS resources (IS-04 + IS-05), with a web GUI.
 * **RX channel** = virtual NMOS **sender** (with source and flow). It receives SRT and sends the stream to a
   configurable multicast group. Its transport file is the **original SDP** with new `c=`, `m=` port,
   `a=source-filter`, `o=` (optionally a new `a=ts-refclk`).
-* The source SDP travels **inside the SRT stream** (one non-RTP datagram per second). The RX side needs no
-  HTTP path to the TX side; a manual SDP can override it.
+* **srt-live-transmit reads and writes the multicast directly** (`udp://@group:port?adapter=..&source=..` on
+  TX, `udp://group:port?adapter=..&ttl=..` on RX). The bridge does not sit in the media path; it only listens
+  passively in the same groups for counters and BCP-008.
+* The source SDP travels over a **second, small SRT link on SRT port + 1** (same passphrase), once per
+  second. The RX side needs no HTTP path to the TX side. A manual SDP can override it.
+* **FEC** (SRT packet filter) is optional per channel.
 * Registry: unicast DNS-SD (`_nmos-register._tcp`, legacy `_nmos-registration._tcp`), mDNS, or manual URL.
 * Several TX and RX channels per container, one SRT connection (port) per channel.
 * **IS-12 + BCP-008-01/-02**: one NcReceiverMonitor per TX channel, one NcSenderMonitor per RX channel, with
@@ -45,12 +49,14 @@ so they stay stable across restarts and image updates. On `docker stop` the node
 
 ## RTP timestamps
 
-Default: **pass-through**. RTP timestamps are not touched. This is correct when both sites are locked to the same
+Default: **pass-through**. The packets go through srt-live-transmit unchanged, timestamps included
+(`tools/rtp_compare.py` checks this byte by byte). This is correct when both sites are locked to the same
 PTP time (e.g. both GMs on GNSS). Receivers at site B then see packets that are
 `SRT latency + transit` old (about 125 ms with 120 ms latency in the lab). Their **link offset / playout
 delay must be larger than that**, otherwise they drop the packets.
 
-Option per RX channel: **restamp to local PTP time**. Timestamps are shifted by a constant so they are "now"
+Option per RX channel: **restamp to local PTP time**. This is the only mode with a relay in the path
+(srt-live-transmit → `127.0.0.1` → relay → multicast). Timestamps are shifted by a constant so they are "now"
 on the RX host (`a=mediaclk:direct=0` in the published SDP). Receivers can then use normal small link
 offsets. This requires the RX host clock to be disciplined to PTP (ptp4l + phc2sys). The clock source is
 `CLOCK_TAI` if the kernel TAI offset is set, otherwise `CLOCK_REALTIME + 37 s` (configurable). If the
@@ -131,13 +137,41 @@ the annotated label unless it was set explicitly via IS-12. Renaming a channel i
 
 ## SRT
 
-Each channel can be caller or listener (TX default caller, RX default listener), with latency,
-AES passphrase (10–79 characters, 16/24/32 byte keys) and stream id. srt-live-transmit runs supervised and restarts
-after 2 s if it exits. The GUI shows RTT, rate, lost/retransmitted/dropped packets from its JSON statistics.
+Each channel can be caller or listener (TX default caller, RX default listener). Per channel you set:
+latency, AES passphrase (10–79 characters, 16/24/32 byte keys), stream id and FEC.
+
+Per channel there are two SRT links:
+
+| | port | content |
+|---|---|---|
+| media | SRT port (e.g. 9000) | the AES67 stream, unchanged |
+| SDP | SRT port + 1 (e.g. 9001), configurable | the source SDP, once per second |
+
+**Firewall:** open both UDP ports towards the listener. Both sites must run the same bridge version, because
+earlier versions sent the SDP inside the media stream.
+
+Changing the IS-05 output of an RX channel (on/off, new group) restarts its srt-live-transmit. The SRT caller
+reconnects within about a second. While the output is off, the stream goes to an unused local port, so the
+SRT link stays up.
+
+**FEC** uses SRT's built-in packet filter, e.g. `fec,cols:10,rows:5`. Set the same value on both sides.
+* `cols` is the row length. A row of `cols` packets gets one parity packet, which repairs a single loss in that row.
+* With `rows` > 1 there is also one parity packet per column. A burst of up to `cols` consecutive packets
+  can then be rebuilt as well.
+* Extra traffic is about 1/cols + 1/rows (10×5 ≈ 30 %, at 1000 pkt/s AES67 that is ~0.8 Mbit/s).
+* Lost packets that FEC cannot rebuild are still retransmitted (ARQ).
+* The FEC matrix must fit into the latency: cols × rows × packet time (10×5 at 1 ms = 50 ms) < latency.
+
+Lab result at 1 % random loss: with FEC 10×5, 296 of 335 lost packets were rebuilt without waiting for an RTT
+and 2 were retransmitted. Without FEC, all 461 needed a retransmission. On a link with 20–40 ms RTT, this is
+what decides whether a packet arrives in time.
+
+srt-live-transmit runs supervised and restarts after 2 s if it exits. The GUI shows RTT, rate,
+lost/retransmitted/dropped/belated packets and FEC rebuilt/failed from its statistics.
 Passphrases are masked in all logs.
 
-Internal hops use `127.0.0.1:41000+channel id` (`LOCAL_BASE_PORT`). Change that if two
-bridge containers share one host network (as in the lab test).
+The SDP link and the "output off" sink use local ports `127.0.0.1:41000+id` / `41500+id` (`LOCAL_BASE_PORT`).
+Change that if two bridge containers share one host network (as in the lab test).
 
 ## Conformance
 

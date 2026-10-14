@@ -1,11 +1,17 @@
 """Media pipelines around srt-live-transmit.
 
-TX:  multicast (AES67)  ->  relay (count, inject SDP)  ->  127.0.0.1:lp  ->  srt-live-transmit  ->  srt://...
-RX:  srt://...  ->  srt-live-transmit  ->  127.0.0.1:lp  ->  relay (strip SDP, restamp RTP)  ->  multicast
+TX:  srt-live-transmit  udp://@group:port?adapter=..&source=..  ->  srt://host:port          (media, direct)
+     srt-live-transmit  udp://127.0.0.1:cp (SDP frames)         ->  srt://host:port+1        (SDP link)
+RX:  srt-live-transmit  srt://:port                             ->  udp://group:port?adapter=..&ttl=..  (media, direct)
+     srt-live-transmit  srt://:port+1                           ->  udp://127.0.0.1:cp (SDP frames)
 
-The source SDP travels inside the SRT stream: every second the TX relay sends one non-RTP datagram
-(MAGIC + zlib(SDP)). RTP v2 packets always start with 0b10xxxxxx, MAGIC starts with 'A' (0b01000001),
-so the RX relay can tell them apart without any framing.
+srt-live-transmit reads and writes the multicast itself, the packets are not touched. The bridge only listens in
+passively (a second socket in the same group) to count packets and check RTP for BCP-008.
+Only the optional "restamp" mode on the RX side needs a relay in the path:
+     srt-live-transmit  srt://:port  ->  udp://127.0.0.1:lp  ->  relay (restamp RTP)  ->  multicast
+
+SDP frames: MAGIC + uint32 length + zlib(SDP), sent once per second as UDP datagrams of at most 1456 bytes
+(one SRT message each); the receiver reassembles them, so an SDP larger than one datagram works as well.
 """
 from __future__ import annotations
 
@@ -26,6 +32,7 @@ from urllib.parse import quote
 from sdp import parse as sdp_parse
 
 MAGIC = b"AES67SRT"
+CHUNK = 1456
 SLT = os.environ.get("SRT_LIVE_TRANSMIT", "srt-live-transmit")
 LOCAL_BASE_PORT = int(os.environ.get("LOCAL_BASE_PORT", "41000"))
 MASK32 = 0xFFFFFFFF
@@ -33,6 +40,52 @@ MASK32 = 0xFFFFFFFF
 
 def local_port(index: int) -> int:
     return LOCAL_BASE_PORT + index
+
+
+def local_control_port(index: int) -> int:
+    return LOCAL_BASE_PORT + 500 + index
+
+
+def control_port(ch: dict) -> int:
+    return int(ch["srt"].get("control_port") or int(ch["srt"]["port"]) + 1)
+
+
+def sdp_datagrams(sdp_text: str) -> list[bytes]:
+    z = zlib.compress(sdp_text.encode())
+    frame = MAGIC + struct.pack(">I", len(z)) + z
+    return [frame[i:i + CHUNK] for i in range(0, len(frame), CHUNK)]
+
+
+class FrameParser:
+    """Reassembles SDP frames from the byte stream on srt-live-transmit's stdout."""
+
+    def __init__(self, on_frame):
+        self.buf = b""
+        self.on_frame = on_frame
+
+    def feed(self, data: bytes):
+        self.buf += data
+        while True:
+            i = self.buf.find(MAGIC)
+            if i < 0:
+                self.buf = self.buf[-(len(MAGIC) - 1):]
+                return
+            if len(self.buf) < i + 12:
+                self.buf = self.buf[i:]
+                return
+            n = struct.unpack_from(">I", self.buf, i + 8)[0]
+            if n > 65536:
+                self.buf = self.buf[i + 1:]
+                continue
+            if len(self.buf) < i + 12 + n:
+                self.buf = self.buf[i:]
+                return
+            payload = self.buf[i + 12:i + 12 + n]
+            self.buf = self.buf[i + 12 + n:]
+            try:
+                self.on_frame(zlib.decompress(payload).decode("utf-8", errors="replace"))
+            except zlib.error:
+                pass
 
 
 # ---------------------------------------------------------------- clock
@@ -57,7 +110,7 @@ class MediaClock:
 
 
 # ---------------------------------------------------------------- srt-live-transmit process
-def srt_uri(srt: dict, *, default_mode: str, adapter: str | None = None) -> str:
+def srt_uri(srt: dict, *, default_mode: str, adapter: str | None = None, port: int | None = None, fec: bool = True) -> str:
     mode = srt.get("mode") or default_mode
     host = (srt.get("host") or "").strip() if mode != "listener" else ""
     q = {"mode": mode, "latency": int(srt.get("latency") or 120), "transtype": "live"}
@@ -66,17 +119,27 @@ def srt_uri(srt: dict, *, default_mode: str, adapter: str | None = None) -> str:
         q["pbkeylen"] = int(srt.get("pbkeylen") or 16)
     if srt.get("streamid") and mode == "caller":
         q["streamid"] = srt["streamid"]
+    if fec and (srt.get("packetfilter") or "").strip():
+        q["packetfilter"] = srt["packetfilter"].strip()
     if adapter and mode == "listener":
         q["adapter"] = adapter
-    query = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in q.items())
-    return f"srt://{host}:{int(srt['port'])}?{query}"
+    query = "&".join(f"{k}={quote(str(v), safe=',:')}" for k, v in q.items())
+    return f"srt://{host}:{int(port or srt['port'])}?{query}"
 
 
 class SrtProcess:
-    """Supervised srt-live-transmit; stats (JSON) arrive on stdout, log lines on stderr."""
+    """Supervised srt-live-transmit.
 
-    def __init__(self, name: str, src: str, dst: str, log):
+    stats=True: JSON statistics on stdout (media links); log lines always on stderr.
+    """
+
+    COUNTERS = ("packets", "packetsLost", "packetsDropped", "packetsRetransmitted", "packetsBelated",
+                "packetsFilterExtra", "packetsFilterSupply", "packetsFilterLoss")
+
+    def __init__(self, name: str, src: str, dst: str, log, stats: bool = True):
         self.name, self.src, self.dst, self.log = name, src, dst, log
+        self.stats_enabled = stats
+        self.generation = 0                    # bumped by retarget(); a process started with an older one is replaced
         self.proc: subprocess.Popen | None = None
         self.stats: dict = {}
         self.stats_ts = 0.0
@@ -96,6 +159,10 @@ class SrtProcess:
 
     def stop(self):
         self.running = False
+        self._kill()
+        self.state = "stopped"
+
+    def _kill(self):
         p = self.proc
         if p and p.poll() is None:
             p.terminate()
@@ -103,58 +170,72 @@ class SrtProcess:
                 p.wait(2)
             except subprocess.TimeoutExpired:
                 p.kill()
-        self.state = "stopped"
+
+    def retarget(self, src: str | None = None, dst: str | None = None):
+        """Restart with a new source/target (e.g. a new IS-05 destination). No-op if nothing changed."""
+        src, dst = src or self.src, dst or self.dst
+        if (src, dst) == (self.src, self.dst):
+            return
+        self.src, self.dst = src, dst
+        self.generation += 1
+        self._kill()            # the supervisor notices the newer generation and restarts at once
 
     def cmdline(self) -> list[str]:
-        cmd = [SLT, "-s:1000", "-pf:json", "-loglevel:warn", self.src, self.dst]
+        cmd = [SLT] + (["-s:1000", "-pf:json"] if self.stats_enabled else []) + ["-loglevel:warn", self.src, self.dst]
         if shutil.which("stdbuf"):
             cmd = ["stdbuf", "-oL", "-eL"] + cmd
         return cmd
 
     def _supervise(self):
         while self.running:
+            gen = self.generation
             cmd = self.cmdline()
             shown = " ".join(c for c in cmd if c not in ("stdbuf", "-oL", "-eL"))
             shown = re.sub(r"passphrase=[^&\s]*", "passphrase=***", shown)
             self.log("srt", f"{self.name}: start {shown}")
             try:
-                self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+                self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, bufsize=0)
             except OSError as e:
                 self.state = f"error: {e}"
                 self.log("error", f"{self.name}: cannot start srt-live-transmit: {e}")
                 time.sleep(5)
                 continue
             self.state = "waiting"
-            t = threading.Thread(target=self._read_err, args=(self.proc,), daemon=True)
-            t.start()
-            for line in self.proc.stdout:
-                line = line.strip()
-                if line.startswith("{"):
-                    try:
-                        self.stats = json.loads(line)
-                        self.stats_ts = time.time()
-                        for d in ("send", "recv"):
-                            for k in ("packets", "packetsLost", "packetsDropped", "packetsRetransmitted", "packetsBelated"):
-                                v = (self.stats.get(d) or {}).get(k)
-                                if isinstance(v, (int, float)):
-                                    self.totals[f"{d}_{k}"] = self.totals.get(f"{d}_{k}", 0) + int(v)
-                    except ValueError:
-                        pass
-                elif line:
-                    self._line(line)
+            if gen != self.generation:             # retargeted while starting
+                self._kill()
+            threading.Thread(target=self._read_err, args=(self.proc,), daemon=True).start()
+            for raw in self.proc.stdout:
+                self._stdout_line(raw.decode("utf-8", errors="replace").strip())
             rc = self.proc.wait()
             if not self.running:
                 break
+            if gen != self.generation:
+                continue
             self.restarts += 1
             self.state = f"exited ({rc}), restarting"
             self.log("srt", f"{self.name}: srt-live-transmit exited with {rc}, restart in 2 s")
             time.sleep(2)
         self.state = "stopped"
 
+    def _stdout_line(self, line: str):
+        if line.startswith("{"):
+            try:
+                self.stats = json.loads(line)
+            except ValueError:
+                return
+            self.stats_ts = time.time()
+            for d in ("send", "recv"):
+                for k in self.COUNTERS:
+                    v = (self.stats.get(d) or {}).get(k)
+                    if isinstance(v, (int, float)):
+                        self.totals[f"{d}_{k}"] = self.totals.get(f"{d}_{k}", 0) + int(v)
+        elif line:
+            self._line(line)
+
     def _read_err(self, proc):
-        for line in proc.stderr:
-            line = line.strip()
-            if line:
+        for raw in proc.stderr:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if line and "SRTO_PAYLOADSIZE fixed" not in line:      # FEC notice repeated on every connect
                 self._line(line)
 
     def _line(self, line: str):
@@ -180,47 +261,37 @@ class SrtProcess:
             "state": self.state, "restarts": self.restarts, "stats_fresh": fresh,
             "rtt_ms": link.get("rtt"), "bandwidth_mbps": link.get("bandwidth"),
             "send_mbps": snd.get("mbitRate") if fresh else 0, "recv_mbps": rcv.get("mbitRate") if fresh else 0,
+            "send_packets": t.get("send_packets", 0), "recv_packets": t.get("recv_packets", 0),
             "send_lost": t.get("send_packetsLost", 0), "send_retrans": t.get("send_packetsRetransmitted", 0),
-            "send_dropped": t.get("send_packetsDropped", 0),
+            "send_dropped": t.get("send_packetsDropped", 0), "send_fec_extra": t.get("send_packetsFilterExtra", 0),
             "recv_lost": t.get("recv_packetsLost", 0), "recv_retrans": t.get("recv_packetsRetransmitted", 0),
             "recv_dropped": t.get("recv_packetsDropped", 0), "recv_belated": t.get("recv_packetsBelated", 0),
+            "recv_fec_recovered": t.get("recv_packetsFilterSupply", 0), "recv_fec_failed": t.get("recv_packetsFilterLoss", 0),
+            "recv_fec_extra": t.get("recv_packetsFilterExtra", 0),
             "lines": list(self.lines)[-12:],
         }
 
 
-# ---------------------------------------------------------------- TX
-class TxPipeline:
-    """Feeds one AES67 multicast stream (selected via IS-05 on the virtual receiver) into SRT."""
+IDLE_SRT = {"state": "idle", "restarts": 0, "stats_fresh": False, "rtt_ms": None, "bandwidth_mbps": None, "send_mbps": 0,
+            "recv_mbps": 0, "send_packets": 0, "recv_packets": 0, "send_lost": 0, "send_retrans": 0, "send_dropped": 0,
+            "send_fec_extra": 0, "recv_lost": 0, "recv_retrans": 0, "recv_dropped": 0, "recv_belated": 0,
+            "recv_fec_recovered": 0, "recv_fec_failed": 0, "recv_fec_extra": 0, "lines": []}
 
-    def __init__(self, ch: dict, index: int, interface_ip: str, log):
-        self.ch, self.index, self.interface_ip, self.log = ch, index, interface_ip, log
-        self.lp = local_port(index)
-        src = f"udp://127.0.0.1:{self.lp}"
-        self.slt = SrtProcess(f"TX {ch['label']}", src, srt_uri(ch["srt"], default_mode="caller", adapter=interface_ip), log)
-        self.lock = threading.Lock()
-        self.source: dict | None = None          # {multicast_ip, source_ip, port, sdp}
+
+class Monitor:
+    """Passive listener in a multicast group (srt-live-transmit owns the real socket): counts and checks RTP."""
+
+    def __init__(self, name: str, log):
+        self.name, self.log = name, log
         self.sock: socket.socket | None = None
-        self.out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.running = False
+        self.lock = threading.Lock()
         self.packets = 0
-        self.bytes = 0
         self.last_rx = 0.0
         self.rtp = RtpStats()
-        self.thread: threading.Thread | None = None
-
-    def start(self):
         self.running = True
-        self.slt.start()
-        self.thread = threading.Thread(target=self._loop, daemon=True, name=f"tx-{self.ch['id']}")
-        self.thread.start()
+        threading.Thread(target=self._loop, daemon=True, name=f"mon-{name}").start()
 
-    def stop(self):
-        self.running = False
-        self.set_source(None)
-        self.slt.stop()
-
-    def set_source(self, source: dict | None):
-        """source: {multicast_ip, source_ip, port, sdp} or None (disconnect)."""
+    def watch(self, group: str | None, port: int | None, interface_ip: str, source_ip: str | None = None):
         with self.lock:
             if self.sock:
                 try:
@@ -228,188 +299,258 @@ class TxPipeline:
                 except OSError:
                     pass
                 self.sock = None
-            self.source = source
-            if not source:
+            self.rtp.last_seq = None
+            if not group:
                 return
-            info = sdp_parse(source.get("sdp") or "")
-            self.rtp.reset_expectation(info.get("payload_type"), info.get("encoding"), info.get("channels"))
             try:
-                self.sock = open_rx_socket(source["multicast_ip"], int(source["port"]), self.interface_ip, source.get("source_ip"))
-                self.log("tx", f"{self.ch['label']}: joined {source.get('source_ip') or '*'} -> {source['multicast_ip']}:{source['port']}")
+                self.sock = open_rx_socket(group, int(port), interface_ip, source_ip, reuseport=False)
             except OSError as e:
-                self.log("error", f"{self.ch['label']}: join {source['multicast_ip']}:{source['port']} failed: {e}")
+                self.log("error", f"{self.name}: cannot monitor {group}:{port}: {e}")
+
+    def close(self):
+        self.running = False
+        self.watch(None, None, "")
 
     def _loop(self):
-        last_sdp = 0.0
         while self.running:
             sock = self.sock
-            now = time.time()
-            if self.source and self.source.get("sdp") and now - last_sdp >= 1.0:
-                last_sdp = now
-                pkt = MAGIC + zlib.compress(self.source["sdp"].encode())
-                if len(pkt) <= 1456:
-                    self._send(pkt)
             if not sock:
                 time.sleep(0.1)
                 continue
             try:
-                r, _, _ = select.select([sock], [], [], 0.2)
+                r, _, _ = select.select([sock], [], [], 0.3)
                 if not r:
                     continue
-                for _ in range(64):
+                for _ in range(256):
                     data = sock.recv(2048)
-                    if not data:
-                        break
                     self.packets += 1
-                    self.bytes += len(data)
                     self.last_rx = time.time()
                     self.rtp.check(data)
-                    self._send(data)
             except BlockingIOError:
                 pass
             except (OSError, ValueError):
                 time.sleep(0.05)
 
-    def _send(self, data: bytes):
-        try:
-            self.out.sendto(data, ("127.0.0.1", self.lp))
-        except OSError:
-            pass
+
+# ---------------------------------------------------------------- TX
+class TxPipeline:
+    """One TX channel: the multicast selected via IS-05 on the virtual receiver goes to SRT; the SDP on port+1."""
+
+    def __init__(self, ch: dict, index: int, interface_ip: str, log):
+        self.ch, self.index, self.interface_ip, self.log = ch, index, interface_ip, log
+        self.lock = threading.Lock()
+        self.source: dict | None = None          # {multicast_ip, source_ip, port, sdp}
+        self.data: SrtProcess | None = None      # media link, only while a source is connected
+        self.cp = local_control_port(index)
+        self.ctrl = SrtProcess(f"TX {ch['label']} SDP", f"udp://127.0.0.1:{self.cp}",
+                               srt_uri(ch["srt"], default_mode="caller", adapter=interface_ip, port=control_port(ch), fec=False),
+                               log, stats=False)
+        self.ctrl_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.monitor = Monitor(f"tx-{ch['id']}", log)
+        self.running = False
+
+    def start(self):
+        self.running = True
+        self.ctrl.start()
+        threading.Thread(target=self._sdp_loop, daemon=True, name=f"tx-sdp-{self.ch['id']}").start()
+
+    def stop(self):
+        self.running = False
+        self.set_source(None)
+        self.ctrl.stop()
+        self.monitor.close()
+
+    def set_source(self, source: dict | None):
+        """source: {multicast_ip, source_ip, port, sdp} or None (disconnect)."""
+        with self.lock:
+            if self.data:
+                self.data.stop()
+                self.data = None
+            self.source = source
+            if not source:
+                self.monitor.watch(None, None, self.interface_ip)
+                return
+            info = sdp_parse(source.get("sdp") or "")
+            self.monitor.rtp.reset_expectation(info.get("payload_type"), info.get("encoding"), info.get("channels"))
+            q = f"adapter={self.interface_ip}" + (f"&source={source['source_ip']}" if source.get("source_ip") else "")
+            src = f"udp://@{source['multicast_ip']}:{int(source['port'])}?{q}"
+            dst = srt_uri(self.ch["srt"], default_mode="caller", adapter=self.interface_ip)
+            self.data = SrtProcess(f"TX {self.ch['label']}", src, dst, self.log)
+            self.data.start()
+            self.monitor.watch(source["multicast_ip"], int(source["port"]), self.interface_ip, source.get("source_ip"))
+            self.log("tx", f"{self.ch['label']}: {source.get('source_ip') or '*'} -> {source['multicast_ip']}:{source['port']} via SRT")
+
+    def _sdp_loop(self):
+        while self.running:
+            src = self.source
+            if src and src.get("sdp"):
+                for d in sdp_datagrams(src["sdp"]):
+                    try:
+                        self.ctrl_sock.sendto(d, ("127.0.0.1", self.cp))
+                    except OSError:
+                        pass
+            time.sleep(1.0)
 
     def status(self) -> dict:
+        data = self.data
         return {"source": {k: v for k, v in (self.source or {}).items() if k != "sdp"} if self.source else None,
-                "packets": self.packets, "bytes": self.bytes, "rtp": self.rtp.snapshot(),
-                "receiving": time.time() - self.last_rx < 1.0, "srt": self.slt.summary()}
+                "packets": self.monitor.packets, "rtp": self.monitor.rtp.snapshot(),
+                "receiving": time.time() - self.monitor.last_rx < 1.0,
+                "srt": data.summary() if data else dict(IDLE_SRT), "sdp_link": self.ctrl.state}
 
 
 # ---------------------------------------------------------------- RX
 class RxPipeline:
-    """Receives SRT, recovers the SDP, restamps RTP to local PTP time and sends the virtual sender's multicast."""
+    """One RX channel: SRT to the virtual sender's multicast (direct), SDP from port+1, optional restamp relay."""
 
     def __init__(self, ch: dict, index: int, interface_ip: str, clock: MediaClock, log, on_sdp):
         self.ch, self.index, self.interface_ip, self.clock, self.log, self.on_sdp = ch, index, interface_ip, clock, log, on_sdp
         self.lp = local_port(index)
-        dst = f"udp://127.0.0.1:{self.lp}"
-        self.slt = SrtProcess(f"RX {ch['label']}", srt_uri(ch["srt"], default_mode="listener", adapter=interface_ip), dst, log)
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("127.0.0.1", self.lp))
-        self.out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.out.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, int(ch.get("out", {}).get("ttl") or 32))
-        try:
-            self.out.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface_ip))
-            self.out.bind((interface_ip, 0))
-        except OSError as e:
-            log("error", f"{ch['label']}: bind output to {interface_ip} failed: {e}")
-        self.out.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
-        self.source_port = self.out.getsockname()[1]
+        self.ttl = int((ch.get("out") or {}).get("ttl") or 32)
+        self.restamp = bool(ch.get("restamp", False))
         self.dest: tuple[str, int] | None = None     # set by IS-05 activation (master_enable)
-        self.running = False
         self.sdp: str | None = None
         self.sdp_ts = 0.0
+        self.parser = FrameParser(self._on_frame)
+        self.cp = local_control_port(index)
+        self.ctrl_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.ctrl_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.ctrl_sock.bind(("127.0.0.1", self.cp))
+        self.ctrl = SrtProcess(f"RX {ch['label']} SDP",
+                               srt_uri(ch["srt"], default_mode="listener", adapter=interface_ip, port=control_port(ch), fec=False),
+                               f"udp://127.0.0.1:{self.cp}", log, stats=False)
+        src = srt_uri(ch["srt"], default_mode="listener", adapter=interface_ip)
+        # direct: srt-live-transmit writes the multicast itself; while the output is off it writes to an unused local port
+        self.data = SrtProcess(f"RX {ch['label']}", src, f"udp://127.0.0.1:{self.lp}", log)
+        self.monitor = Monitor(f"rx-{ch['id']}", log)
+        self.running = False
+        # restamp relay (only in restamp mode)
         self.rate = 48000
-        self.restamp = bool(ch.get("restamp", False))
         self.delta: int | None = None
         self.resyncs = 0
         self.err_ms = 0.0
-        self.packets_in = 0
-        self.packets_out = 0
+        self.relay_in = self.relay_out = 0
         self.send_errors = 0
-        self.last_rx = 0.0
-        self.rtp = RtpStats()
-        self.thread: threading.Thread | None = None
+        self.sock = self.out = None
+        if self.restamp:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.bind(("127.0.0.1", self.lp))
+            self.out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.out.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self.ttl)
+            try:
+                self.out.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(interface_ip))
+                self.out.bind((interface_ip, 0))
+            except OSError as e:
+                log("error", f"{ch['label']}: bind output to {interface_ip} failed: {e}")
+            self.out.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+        self.source_port = self.out.getsockname()[1] if self.out else None
 
     def start(self):
         self.running = True
-        self.slt.start()
-        self.thread = threading.Thread(target=self._loop, daemon=True, name=f"rx-{self.ch['id']}")
-        self.thread.start()
+        self.ctrl.start()
+        self.data.start()
+        threading.Thread(target=self._ctrl_loop, daemon=True, name=f"rx-sdp-{self.ch['id']}").start()
+        if self.restamp:
+            threading.Thread(target=self._relay, daemon=True, name=f"rx-{self.ch['id']}").start()
 
     def stop(self):
         self.running = False
-        self.slt.stop()
-        try:
-            self.sock.close()
-            self.out.close()
-        except OSError:
-            pass
+        self.ctrl.stop()
+        self.data.stop()
+        self.monitor.close()
+        for s in (self.sock, self.out, self.ctrl_sock):
+            try:
+                if s:
+                    s.close()
+            except OSError:
+                pass
+
+    def _ctrl_loop(self):
+        while self.running:
+            try:
+                r, _, _ = select.select([self.ctrl_sock], [], [], 0.5)
+                if r:
+                    self.parser.feed(self.ctrl_sock.recv(4096))
+            except (OSError, ValueError):
+                if not self.running:
+                    break
+                time.sleep(0.1)
+
+    def _on_frame(self, sdp_text: str):
+        self.sdp_ts = time.time()
+        if sdp_text != self.sdp:
+            self.sdp = sdp_text
+            self.on_sdp(self.ch["id"], sdp_text)
 
     def set_output(self, dest: tuple[str, int] | None):
         if dest != self.dest:
             self.log("rx", f"{self.ch['label']}: output {'-> %s:%d' % dest if dest else 'off'}")
         self.dest = dest
         self.delta = None
+        if not self.restamp:
+            target = (f"udp://{dest[0]}:{dest[1]}?adapter={self.interface_ip}&ttl={self.ttl}" if dest
+                      else f"udp://127.0.0.1:{self.lp}")
+            self.data.retarget(dst=target)
+        if dest:
+            self.monitor.watch(dest[0], dest[1], self.interface_ip)
+        else:
+            self.monitor.watch(None, None, self.interface_ip)
 
     def set_format(self, info: dict):
-        self.rtp.reset_expectation(info.get("payload_type"), info.get("encoding"), info.get("channels"))
-        self.set_rate(info.get("sample_rate"))
-
-    def set_rate(self, rate: int | None):
-        if rate and rate != self.rate:
-            self.rate = rate
+        self.monitor.rtp.reset_expectation(info.get("payload_type"), info.get("encoding"), info.get("channels"))
+        if info.get("sample_rate") and info["sample_rate"] != self.rate:
+            self.rate = info["sample_rate"]
             self.delta = None
 
-    def _loop(self):
-        sock = self.sock
+    def _relay(self):
         tolerance = lambda: int(self.rate * float(self.ch.get("resync_ms") or 20) / 1000)
         while self.running:
             try:
-                r, _, _ = select.select([sock], [], [], 0.5)
+                r, _, _ = select.select([self.sock], [], [], 0.5)
                 if not r:
                     continue
-                data = sock.recv(2048)
+                data = self.sock.recv(2048)
             except (OSError, ValueError):
                 if not self.running:
                     break
                 time.sleep(0.05)
                 continue
-            if data[:8] == MAGIC:
-                try:
-                    sdp_text = zlib.decompress(data[8:]).decode("utf-8", errors="replace")
-                except zlib.error:
-                    continue
-                self.sdp_ts = time.time()
-                if sdp_text != self.sdp:
-                    self.sdp = sdp_text
-                    self.on_sdp(self.ch["id"], sdp_text)
-                continue
             if len(data) < 12 or data[0] >> 6 != 2:
                 continue
-            self.packets_in += 1
-            self.last_rx = time.time()
-            self.rtp.check(data)
+            self.relay_in += 1
             dest = self.dest
             if not dest:
                 continue
-            if self.restamp:
-                ts = struct.unpack_from(">I", data, 4)[0]
-                now = int(self.clock.tai() * self.rate) & MASK32
-                if self.delta is None:
-                    self.delta = (now - ts) & MASK32
-                new = (ts + self.delta) & MASK32
-                err = ((now - new + 0x80000000) & MASK32) - 0x80000000
-                if abs(err) > tolerance():
-                    self.delta = (now - ts) & MASK32
-                    new = now
-                    self.resyncs += 1
-                    if self.resyncs < 20 or self.resyncs % 100 == 0:
-                        self.log("rx", f"{self.ch['label']}: RTP restamp resync #{self.resyncs} (error {err * 1000 / self.rate:.1f} ms)")
-                    err = 0
-                self.err_ms = self.err_ms * 0.99 + (err * 1000 / self.rate) * 0.01
-                data = data[:4] + struct.pack(">I", new) + data[8:]
+            ts = struct.unpack_from(">I", data, 4)[0]
+            now = int(self.clock.tai() * self.rate) & MASK32
+            if self.delta is None:
+                self.delta = (now - ts) & MASK32
+            new = (ts + self.delta) & MASK32
+            err = ((now - new + 0x80000000) & MASK32) - 0x80000000
+            if abs(err) > tolerance():
+                self.delta = (now - ts) & MASK32
+                new = now
+                self.resyncs += 1
+                if self.resyncs < 20 or self.resyncs % 100 == 0:
+                    self.log("rx", f"{self.ch['label']}: RTP restamp resync #{self.resyncs} (error {err * 1000 / self.rate:.1f} ms)")
+                err = 0
+            self.err_ms = self.err_ms * 0.99 + (err * 1000 / self.rate) * 0.01
             try:
-                self.out.sendto(data, dest)
-                self.packets_out += 1
+                self.out.sendto(data[:4] + struct.pack(">I", new) + data[8:], dest)
+                self.relay_out += 1
             except OSError:
                 self.send_errors += 1
 
     def status(self) -> dict:
-        return {"packets_in": self.packets_in, "packets_out": self.packets_out, "send_errors": self.send_errors,
-                "rtp": self.rtp.snapshot(), "receiving": time.time() - self.last_rx < 1.0,
-                "sdp_age_s": round(time.time() - self.sdp_ts, 1) if self.sdp_ts else None,
+        srt = self.data.summary()
+        return {"packets_in": srt["recv_packets"], "packets_out": self.monitor.packets, "send_errors": self.send_errors,
+                "rtp": self.monitor.rtp.snapshot(), "receiving": time.time() - self.monitor.last_rx < 1.0,
+                "sdp_age_s": round(time.time() - self.sdp_ts, 1) if self.sdp_ts else None, "sdp_link": self.ctrl.state,
                 "output": f"{self.dest[0]}:{self.dest[1]}" if self.dest else None, "source_port": self.source_port,
+                "mode": "restamp relay" if self.restamp else "direct",
                 "restamp": self.restamp, "restamp_resyncs": self.resyncs, "restamp_err_ms": round(self.err_ms, 2),
-                "clock": self.clock.source(), "srt": self.slt.summary()}
+                "clock": self.clock.source(), "srt": srt}
 
 
 # ---------------------------------------------------------------- RTP checks
@@ -462,10 +603,10 @@ class RtpStats:
 
 
 # ---------------------------------------------------------------- sockets
-def open_rx_socket(group: str, port: int, interface_ip: str, source_ip: str | None = None) -> socket.socket:
+def open_rx_socket(group: str, port: int, interface_ip: str, source_ip: str | None = None, reuseport: bool = True) -> socket.socket:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if hasattr(socket, "SO_REUSEPORT"):
+    if reuseport and hasattr(socket, "SO_REUSEPORT"):
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
     first = int(group.split(".")[0])

@@ -3,7 +3,7 @@
 
 TX channel = virtual NMOS receiver. Connect it (IS-05) to an AES67 sender and its multicast goes out via SRT.
 RX channel = virtual NMOS sender. It receives SRT and re-sends the stream to a configurable multicast group,
-with the original SDP (sent in-band over SRT) rewritten for the new address.
+with the original SDP (sent over a second SRT link on port+1) rewritten for the new address.
 
     python3 server.py            # config in $DATA_DIR/config.json (default /data)
 """
@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -52,9 +53,9 @@ DEFAULT_CONFIG = {
 }
 
 TX_DEFAULT = {"dir": "tx", "label": "SRT TX", "enabled": True,
-              "srt": {"mode": "caller", "host": "", "port": 9000, "latency": 120, "passphrase": "", "pbkeylen": 16, "streamid": ""}}
+              "srt": {"mode": "caller", "host": "", "port": 9000, "latency": 120, "passphrase": "", "pbkeylen": 16, "streamid": "", "packetfilter": "", "control_port": None}}
 RX_DEFAULT = {"dir": "rx", "label": "SRT RX", "enabled": True,
-              "srt": {"mode": "listener", "host": "", "port": 9000, "latency": 120, "passphrase": "", "pbkeylen": 16, "streamid": ""},
+              "srt": {"mode": "listener", "host": "", "port": 9000, "latency": 120, "passphrase": "", "pbkeylen": 16, "streamid": "", "packetfilter": "", "control_port": None},
               "out": {"dest_ip": "239.69.10.1", "dest_port": 5004, "ttl": 32},
               "restamp": False, "resync_ms": 20, "refclk": "", "manual_sdp": "", "default_channels": 2, "auto_enable": True}
 
@@ -321,7 +322,7 @@ class Bridge:
                 entry["active"]["transport_params"] = [self.node.resolve("sender", ch["id"], st.active["transport_params"][0])]
                 src = self.rx_sdp(ch["id"])
                 entry["sdp_info"] = sdplib.parse(src) if src else None
-                entry["sdp_source"] = "manual" if (ch.get("manual_sdp") or "").strip() else ("in-band" if src else None)
+                entry["sdp_source"] = "manual" if (ch.get("manual_sdp") or "").strip() else ("via SRT" if src else None)
             res = self.node.get("receiver" if ch["dir"] == "tx" else "sender", entry["nmos_id"]) or {}
             entry["nmos_label"] = res.get("label")
             entry["nmos_tags"] = {k: v for k, v in (res.get("tags") or {}).items() if v}
@@ -403,6 +404,14 @@ class Bridge:
         ch["srt"]["latency"] = int(ch["srt"].get("latency") or 120)
         if ch["srt"].get("mode") == "caller" and not (ch["srt"].get("host") or "").strip():
             raise ValueError("SRT caller needs a host")
+        cp = ch["srt"].get("control_port")
+        ch["srt"]["control_port"] = int(cp) if cp not in (None, "", 0) else None
+        if (ch["srt"]["control_port"] or ch["srt"]["port"] + 1) == ch["srt"]["port"]:
+            raise ValueError("the SDP port must differ from the SRT port")
+        pf = (ch["srt"].get("packetfilter") or "").strip()
+        if pf and not re.fullmatch(r"fec(,[a-z]+:[A-Za-z0-9-]+)*", pf):
+            raise ValueError("FEC must look like fec,cols:10,rows:5 (SRT packetfilter syntax)")
+        ch["srt"]["packetfilter"] = pf
         pw = ch["srt"].get("passphrase") or ""
         if pw and not 10 <= len(pw) <= 79:
             raise ValueError("SRT passphrase must be 10..79 characters")

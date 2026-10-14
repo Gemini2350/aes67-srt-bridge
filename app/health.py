@@ -8,9 +8,9 @@ TX channel -> NcReceiverMonitor (reception only: the multicast input; the SRT li
 
 RX channel -> NcSenderMonitor
   link          interface operstate
-  transmission  send errors on the multicast output -> Unhealthy
-  essence       no SDP / SRT not connected / no packets -> Unhealthy,
-                SRT loss, retransmissions or RTP sequence gaps -> PartiallyHealthy (inherited from the SRT "receiver")
+  transmission  send errors (restamp relay) or SRT delivers but nothing appears on the output multicast -> Unhealthy
+  essence       no SDP / SRT not connected / nothing received via SRT -> Unhealthy,
+                unrecoverable SRT loss, RTP gaps, retransmissions or FEC recoveries -> PartiallyHealthy
   sync          NotUsed, source "internal"
 """
 from __future__ import annotations
@@ -119,23 +119,30 @@ class Health:
         self.prev[ch["id"]] = cur
         srt = st["srt"]
         listen = f"{ch['srt'].get('host') or 'listener'}:{ch['srt'].get('port')}"
-        packets = _delta(cur, prev, "packets_in")
+        out_packets = _delta(cur, prev, "packets_out")          # seen on the output multicast (passive monitor)
         send_errors = _delta(cur, prev, "send_errors")
-        lost = _delta(cur, prev, "lost")
-        srt_lost = _delta(cur, prev, "srt_recv_lost") + _delta(cur, prev, "srt_recv_dropped")
-        retrans = _delta(cur, prev, "srt_recv_retrans")
+        gaps = _delta(cur, prev, "lost")                          # RTP sequence gaps on the output
+        dropped = _delta(cur, prev, "srt_recv_dropped")           # unrecoverable on the SRT link
+        recovered = _delta(cur, prev, "srt_recv_retrans") + _delta(cur, prev, "srt_recv_fec_recovered")
+        # srt-live-transmit reports statistics about once per second: "receiving" = fresh report with traffic
+        srt_receiving = srt["state"] == "connected" and srt.get("stats_fresh") and (srt.get("recv_mbps") or 0) > 0
 
-        transmission = (UNHEALTHY, f"{send_errors} send errors on {st.get('output')}") if send_errors else (HEALTHY, None)
+        if send_errors:
+            transmission = (UNHEALTHY, f"{send_errors} send errors on {st.get('output')}")
+        elif srt_receiving and out_packets == 0:
+            transmission = (UNHEALTHY, f"SRT delivers packets, but none appear on {st.get('output')}")
+        else:
+            transmission = (HEALTHY, None)
         if not self.b.rx_sdp(ch["id"]):
             essence = (UNHEALTHY, "no source SDP received yet")
         elif srt["state"] != "connected":
             essence = (UNHEALTHY, f"no essence: SRT {listen} not connected ({srt['state']})")
-        elif packets == 0:
+        elif not srt_receiving:
             essence = (UNHEALTHY, "no essence: no packets received via SRT")
-        elif srt_lost or lost:
-            essence = (PARTIAL, f"{max(srt_lost, lost)} packets lost on the SRT link")
-        elif retrans:
-            essence = (PARTIAL, f"SRT recovered losses by retransmitting {retrans} packets")
+        elif dropped or gaps:
+            essence = (PARTIAL, f"{max(dropped, gaps)} packets lost on the SRT link")
+        elif recovered:
+            essence = (PARTIAL, f"SRT recovered {recovered} lost packets (retransmission/FEC)")
         else:
             essence = (HEALTHY, None)
         counters = {"transmission": {"send errors": (send_errors, "errors sending the multicast output")}}
