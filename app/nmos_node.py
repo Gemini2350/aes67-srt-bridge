@@ -26,6 +26,18 @@ RTP = "urn:x-nmos:transport:rtp"
 SDP_TYPE = "application/sdp"
 
 
+#: BCP-002 namespaces are device-provided and read-only via IS-13 (PATCH -> 500)
+READ_ONLY_TAG_PREFIXES = ("urn:x-nmos:tag:grouphint/", "urn:x-nmos:tag:asset:")
+
+
+#: BCP-002-02 values (manufacturer, product name, device function)
+ASSET_MANUFACTURER, ASSET_PRODUCT, ASSET_FUNCTION = "Gemini2350", "AES67 SRT Bridge", "SRT Bridge"
+
+
+def is_read_only_tag(name: str) -> bool:
+    return name.startswith(READ_ONLY_TAG_PREFIXES)
+
+
 def tai_version() -> str:
     t = time.time() + 37
     return f"{int(t)}:{int((t % 1) * 1e9)}"
@@ -234,6 +246,14 @@ class Node:
         }
         for r in want.values():
             self.annotate(r)
+        # BCP-002-02 asset distinguishing information: fixed inventory tags on self and device (function only on
+        # the device), applied last so user annotations cannot shadow them
+        asset = {"urn:x-nmos:tag:asset:manufacturer/v1.0": [ASSET_MANUFACTURER],
+                 "urn:x-nmos:tag:asset:product/v1.0": [ASSET_PRODUCT],
+                 "urn:x-nmos:tag:asset:instance-id/v1.0": [self.node_id]}
+        want[f"node/{self.node_id}"]["tags"] = {**want[f"node/{self.node_id}"].get("tags", {}), **asset}
+        want[f"device/{self.device_id}"]["tags"] = {**want[f"device/{self.device_id}"].get("tags", {}), **asset,
+                                                    "urn:x-nmos:tag:asset:function/v1.0": [ASSET_FUNCTION]}
         with self.lock:
             for key, r in want.items():
                 old = self.res.get(key)
@@ -690,7 +710,8 @@ class Node:
             r["description"] = a["description"]
         tags = dict(r.get("tags") or {})
         for k, v in (a.get("tags") or {}).items():
-            tags[k] = v
+            if not is_read_only_tag(k):
+                tags[k] = v
         r["tags"] = tags
 
     def _annotation(self, method, parts, body):
@@ -719,7 +740,7 @@ class Node:
             if len(parts) == 3:
                 if method != "GET":
                     return 405, {"code": 405, "error": "method not allowed", "debug": None}, J
-                return 200, [core(r) for r in self.get(m[coll])], J
+                return 200, [r["id"] + "/" for r in self.get(m[coll])], J
             if len(parts) != 4:
                 return nf
             rid = parts[3]
@@ -733,6 +754,9 @@ class Node:
         error = self._validate_annotation(body)
         if error:
             return 400, {"code": 400, "error": error, "debug": None}, J
+        for k in (body.get("tags") or {}):
+            if is_read_only_tag(k):
+                return 500, {"code": 500, "error": f"tag {k} is read-only", "debug": None}, J
         too_big = self._too_big(body)
         if too_big:
             return 500, {"code": 500, "error": too_big, "debug": None}, J
@@ -761,7 +785,15 @@ class Node:
                 store.pop(rid, None)
             self.b.save()
         self.b.log("is13", f"{m[coll]} {rid[:8]} annotated: {json.dumps(body)[:200]}")
+        before = (self.get(m[coll], rid) or {}).get("version")
         self.build()
+        # IS-13: every successful PATCH increments the version, also when nothing changed (e.g. a reset)
+        key = f"{m[coll]}/{rid}"
+        with self.lock:
+            if key in self.res and self.res[key].get("version") == before:
+                self.res[key]["version"] = new_version()
+                self.dirty.add(key)
+        self.wake.set()
         self.b.annotations_changed()
         return 200, core(self.get(m[coll], rid)), J
 
