@@ -166,7 +166,13 @@ Lab result at 1 % random loss: with FEC 10×5, 296 of 335 lost packets were rebu
 and 2 were retransmitted. Without FEC, all 461 needed a retransmission. On a link with 20–40 ms RTT, this is
 what decides whether a packet arrives in time.
 
-srt-live-transmit runs supervised and restarts after 2 s if it exits. The GUI shows RTT, rate,
+srt-live-transmit runs supervised. If it exits, it restarts with a growing pause (2 s, 4 s … up to 30 s);
+a run longer than 60 s resets the pause. An unresolvable SRT host name shows up as
+`srt_connect: Operation not supported: Bad parameters`.
+
+**Logs:** identical messages (ignoring numbers) are written once per 5 minutes and then summarised
+("repeated N×"). SRT's own warnings such as FEC rebuild failures stay in the channel view and do not go to the
+container log. `docker-compose.yml` limits the container log to 3 × 10 MB. The GUI shows RTT, rate,
 lost/retransmitted/dropped/belated packets and FEC rebuilt/failed from its statistics.
 Passphrases are masked in all logs.
 

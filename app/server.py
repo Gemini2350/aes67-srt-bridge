@@ -60,11 +60,33 @@ RX_DEFAULT = {"dir": "rx", "label": "SRT RX", "enabled": True,
               "restamp": False, "resync_ms": 20, "refclk": "", "manual_sdp": "", "default_channels": 2, "auto_enable": True}
 
 LOG: deque = deque(maxlen=400)
+LOG_REPEAT_WINDOW = 300                 # s: identical messages (ignoring numbers) are shown once per window
+_log_seen: dict[str, list] = {}         # pattern -> [first_ts, suppressed count]
+_log_lock = threading.Lock()
+
+
+def _emit(kind: str, text: str):
+    LOG.appendleft({"ts": time.strftime("%H:%M:%S"), "kind": kind, "text": text})
+    print(f"[{kind}] {text}", flush=True)
 
 
 def log(kind: str, text: str):
-    LOG.appendleft({"ts": time.strftime("%H:%M:%S"), "kind": kind, "text": text})
-    print(f"[{kind}] {text}", flush=True)
+    """Log to the GUI buffer and stdout (docker logs). A message that repeats (e.g. a reconnect loop) is written
+    once per LOG_REPEAT_WINDOW, followed by a summary of how often it was suppressed."""
+    key = kind + " " + re.sub(r"\d+", "#", text)
+    now = time.time()
+    with _log_lock:
+        seen = _log_seen.get(key)
+        if seen and now - seen[0] < LOG_REPEAT_WINDOW:
+            seen[1] += 1
+            return
+        if seen and seen[1]:
+            _emit(kind, f"(previous message repeated {seen[1]}× in {int(now - seen[0])} s)")
+        _log_seen[key] = [now, 0]
+        if len(_log_seen) > 2000:
+            for k in [k for k, v in _log_seen.items() if now - v[0] > LOG_REPEAT_WINDOW]:
+                del _log_seen[k]
+    _emit(kind, text)
 
 
 def merge(default: dict, saved: dict) -> dict:

@@ -5,6 +5,11 @@ services:
     container_name: aes67-srt-bridge
     network_mode: host          # multicast, IGMP and NMOS need the real interfaces
     restart: unless-stopped
+    logging:                    # docker keeps container logs without a size limit by default
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     security_opt:
       - apparmor:unconfined     # Docker's default AppArmor profile blocks D-Bus; needed for "Flush host DNS cache"
     environment:

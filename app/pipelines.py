@@ -187,8 +187,10 @@ class SrtProcess:
         return cmd
 
     def _supervise(self):
+        backoff = 2.0
         while self.running:
             gen = self.generation
+            started = time.time()
             cmd = self.cmdline()
             shown = " ".join(c for c in cmd if c not in ("stdbuf", "-oL", "-eL"))
             shown = re.sub(r"passphrase=[^&\s]*", "passphrase=***", shown)
@@ -211,10 +213,14 @@ class SrtProcess:
                 break
             if gen != self.generation:
                 continue
+            # restart with growing back-off (2 s .. 30 s) while it keeps failing; a run of > 60 s resets it
+            backoff = 2.0 if time.time() - started > 60 else min(backoff * 2, 30.0) if self.restarts else 2.0
             self.restarts += 1
             self.state = f"exited ({rc}), restarting"
-            self.log("srt", f"{self.name}: srt-live-transmit exited with {rc}, restart in 2 s")
-            time.sleep(2)
+            self.log("srt", f"{self.name}: srt-live-transmit exited with {rc}, restart in {backoff:.0f} s")
+            deadline = time.time() + backoff
+            while self.running and gen == self.generation and time.time() < deadline:
+                time.sleep(0.2)
         self.state = "stopped"
 
     def _stdout_line(self, line: str):
@@ -247,7 +253,9 @@ class SrtProcess:
                 self.state = "connected"
         if "disconnect" in low or "broken" in low or "lost" in low and "connection" in low:
             self.state = "disconnected"
-        if "error" in low or "fail" in low:
+        # only real errors go to the bridge log; SRT's own warnings (e.g. "FEC ... rebuilding FAILED" for every
+        # unrecoverable FEC group, RCV-DROPPED) stay in the channel's line buffer and statistics
+        if line.startswith("ERROR") or ("error" in low and "!w:" not in low) or "connection setup failure" in low:
             self.log("srt", f"{self.name}: {line}")
 
     def summary(self) -> dict:
